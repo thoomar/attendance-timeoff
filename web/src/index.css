@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global polish */
+:root { color-scheme: light; }
+body {
+  @apply bg-gradient-to-b from-slate-50 to-white text-slate-800 font-sans antialiased;
+}
+h1 { @apply text-3xl md:text-4xl font-semibold tracking-tight; }
+.card { @apply rounded-2xl border border-slate-200 bg-white shadow-soft; }
+.btn { @apply inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium transition hover:shadow-soft hover:border-slate-400; }
+.btn-primary { @apply inline-flex items-center justify-center rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-soft hover:bg-brand-700; }
+input, textarea, select { @apply rounded-xl; }
