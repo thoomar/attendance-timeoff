@@ -1,0 +1,16 @@
+{
+  "name": "attendance-tracker-timeoff",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run -w server dev & npm run -w web dev",
+    "build": "npm -w server run build && npm -w web run build",
+    "start": "npm -w server start",
+    "format": "npm -w server run format && npm -w web run format",
+    "lint": "npm -w server run lint && npm -w web run lint"
+  }
+}
