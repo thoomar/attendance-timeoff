@@ -1,0 +1,15 @@
+
+# Node
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+build/
+.DS_Store
+.idea/
+.env
+.env.local
+*.log
+*.sqlite
+.vercel/
+.netlify/
