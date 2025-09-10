@@ -61,7 +61,7 @@ export default function TimeOffPage() {
     return (
         <div className="min-h-dvh">
             {/* Top bar */}
-            <header className="sticky top-0 z-30 backdrop-blur bg-white/70 border-b border-slate-200">
+            <header className="sticky top-0 z-30 backdrop-blur bg-black/40 border-b border-slate-800">
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <div className="h-8 w-8 rounded-xl bg-brand-600" />
@@ -147,7 +147,7 @@ export default function TimeOffPage() {
                         ) : (
                             <ul className="space-y-3">
                                 {pending.map(p => (
-                                    <li key={p.id} className="rounded-xl border border-slate-200 p-4">
+                                    <li key={p.id} className="rounded-xl border border-slate-800 p-4">
                                         <div className="flex items-center justify-between">
                                             <div className="font-semibold">
                                                 {p.employee_name}{' '}
