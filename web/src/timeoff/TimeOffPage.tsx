@@ -18,6 +18,22 @@ export default function TimeOffPage() {
     const [pending, setPending] = useState<PendingItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
 
+    // NEW: Zoho connection gate
+    const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
+    useEffect(() => {
+        fetch('/api/zoho/status')
+            .then(r => r.json())
+            .then(d => {
+                setZohoConnected(!!d.connected);
+                // If arriving from the portal with ?connected=zoho and not connected yet, kick off OAuth
+                const params = new URLSearchParams(location.search);
+                if (!d.connected && params.get('connected') === 'zoho') {
+                    location.href = '/api/zoho/connect?returnTo=' + encodeURIComponent(location.pathname);
+                }
+            })
+            .catch(() => setZohoConnected(false));
+    }, []);
+
     useEffect(() => { fetch('/api/me').then(r=>r.json()).then(setUser); }, []);
     useEffect(() => {
         const from = new Date(); const to = new Date(); to.setMonth(to.getMonth()+2);
@@ -51,7 +67,25 @@ export default function TimeOffPage() {
         if (res.ok) setPending(p => p.filter(i => i.id !== id));
     }
 
+    // Loading states
     if (!user) return <div className="p-6 text-sm text-slate-400">Loading…</div>;
+    if (zohoConnected === null) return <div className="p-6 text-sm text-slate-400">Checking Zoho…</div>;
+    if (!zohoConnected) {
+        return (
+            <div className="min-h-dvh flex items-center justify-center p-6">
+                <div className="card p-8 max-w-md w-full space-y-4">
+                    <h2 className="text-lg font-semibold">Connect Zoho</h2>
+                    <p className="text-slate-400 text-sm">Please connect your Zoho account to continue.</p>
+                    <a
+                        href={`/api/zoho/connect?returnTo=${encodeURIComponent(location.pathname)}`}
+                        className="btn-primary inline-flex"
+                    >
+                        Connect Zoho
+                    </a>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-dvh">
