@@ -17,3 +17,5 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+*.zip
+*.tsbuildinfo
