@@ -2,21 +2,6 @@ import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
 
-/**
- * If you are using the v2 physical table, create a compatibility view so the SQL below works unchanged:
- *
- *   create or replace view time_off_requests as
- *   select
- *     id,
- *     requester_user_id as employee_user_id,
- *     request_date       as date,
- *     status,
- *     reason
- *   from time_off_requests_v2;
- *
- * Then set TIME_OFF_TABLE=time_off_requests (the view).
- */
-
 // --- tolerant import for your db module (supports named/default) ---
 import * as dbmod from '../db';
 const dbQuery: (sql: string, params?: any[]) => Promise<{ rows: any[] }> =
@@ -32,13 +17,12 @@ import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTempl
 const router = express.Router();
 
 /** -------- Env / Config -------- */
-const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests';
+const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests_v2';
 
 const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
-
 const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
 
 // Prefer APP_BASE_URL, fall back to SITE_URL
@@ -82,10 +66,8 @@ function assertApproversConfigured() {
 
 /**
  * POST /api/time-off/requests
- * Creates one row per selected date.
- * Works with:
- *  - v1 table (employee_user_id, date, reason, status)
- *  - a v2 compatibility view mapping requester_user_id→employee_user_id, request_date→date
+ * V2 columns: requester_user_id, request_date, reason, status
+ * Returns aliased columns so clients still see employee_user_id/date.
  */
 router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -103,9 +85,14 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
         }
 
         const insertSql = `
-            INSERT INTO ${TABLE} (employee_user_id, date, reason)
+            INSERT INTO ${TABLE} (requester_user_id, request_date, reason)
             VALUES ${params.join(', ')}
-                RETURNING id, employee_user_id, date, reason, status
+                RETURNING
+        id,
+        requester_user_id AS employee_user_id,
+        request_date      AS date,
+        reason,
+        status
         `;
 
         const { rows } = await dbQuery(insertSql, values);
@@ -136,8 +123,8 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
 
 /**
  * GET /api/time-off/pending
- * If requester is an approver (email matches APPROVER_EMAILS/HR_EMAILS), return all pending.
- * Otherwise, only this user’s pending rows.
+ * If requester is an approver, return all pending. Otherwise only the user’s own pending items.
+ * Uses V2 columns and aliases to v1-style names.
  */
 router.get('/pending', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -145,17 +132,30 @@ router.get('/pending', requireAuth, async (req: Request, res: Response) => {
         const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
 
         const sql = isApprover
-            ? `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
+            ? `SELECT
+                   r.id,
+                   r.requester_user_id AS employee_user_id,
+                   r.request_date      AS date,
+            r.reason,
+            r.status,
+            u.full_name,
+            u.email
                FROM ${TABLE} r
-                        LEFT JOIN users u ON u.id = r.employee_user_id
+                   LEFT JOIN users u ON u.id = r.requester_user_id
                WHERE r.status = 'PENDING'
-               ORDER BY r.date ASC`
-            : `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status
+               ORDER BY r.request_date ASC`
+            : `SELECT
+                   r.id,
+                   r.requester_user_id AS employee_user_id,
+                   r.request_date      AS date,
+            r.reason,
+            r.status
                FROM ${TABLE} r
-               WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
-               ORDER BY r.date ASC`;
+               WHERE r.requester_user_id = $1 AND r.status = 'PENDING'
+               ORDER BY r.request_date ASC`;
 
         const { rows } = await dbQuery(sql, isApprover ? [] : [user.id]);
+
         res.json(
             groupRows(
                 rows as Array<{
@@ -176,8 +176,7 @@ router.get('/pending', requireAuth, async (req: Request, res: Response) => {
 
 /**
  * GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
- * Returns entries aggregated by employee with a dates[] array and combined status.
- * Combined status: PENDING if any date in range is pending, else APPROVED.
+ * Aggregates by employee over V2 columns, aliasing to v1-style names.
  */
 router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -189,17 +188,17 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
 
         const sql = `
             SELECT
-                r.employee_user_id AS user_id,
+                r.requester_user_id AS user_id,
                 u.full_name         AS user_name,
                 u.email             AS user_email,
-                ARRAY_AGG(r.date::text ORDER BY r.date) AS dates,
+                ARRAY_AGG(r.request_date::text ORDER BY r.request_date) AS dates,
                 CASE WHEN BOOL_OR(r.status = 'PENDING') THEN 'PENDING' ELSE 'APPROVED' END AS status
             FROM ${TABLE} r
-                     LEFT JOIN users u ON u.id = r.employee_user_id
-            WHERE r.date BETWEEN $1 AND $2
+                     LEFT JOIN users u ON u.id = r.requester_user_id
+            WHERE r.request_date BETWEEN $1 AND $2
               AND r.status IN ('PENDING','APPROVED')
-            GROUP BY r.employee_user_id, u.full_name, u.email
-            ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
+            GROUP BY r.requester_user_id, u.full_name, u.email
+            ORDER BY COALESCE(u.full_name, u.email, r.requester_user_id::text)
         `;
 
         const { rows } = await dbQuery(sql, [from, to]);
@@ -220,8 +219,8 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
 
 /**
  * POST /api/time-off/decision
- * Updates one row (specific date) and emails the employee.
- * Note: We only update status + decided_at to stay compatible with both v1 and a v2 view.
+ * Updates a single V2 row and emails the employee.
+ * Only updates status + decided_at (works whether other cols exist or not).
  */
 router.post('/decision', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -236,7 +235,12 @@ router.post('/decision', requireAuth, async (req: Request, res: Response) => {
             UPDATE ${TABLE}
             SET status = $1, decided_at = NOW()
             WHERE id = $2 AND status = 'PENDING'
-                RETURNING id, employee_user_id, date, reason, status
+                RETURNING
+        id,
+        requester_user_id AS employee_user_id,
+        request_date      AS date,
+        reason,
+        status
         `;
 
         const { rows } = await dbQuery(updateSql, [decision, id]);
@@ -297,7 +301,7 @@ function groupRows(rows: Array<{ id: string; employee_user_id: string; date: str
             const diffDays = (next.getTime() - prev.getTime()) / (24 * 3600 * 1000);
             if (diffDays === 1 && r.reason === cur.reason) {
                 cur.end = r.date;
-                cur!.ids.push(r.id);
+                cur.ids.push(r.id);
             } else {
                 out.push(cur);
                 cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
