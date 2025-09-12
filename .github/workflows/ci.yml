@@ -16,10 +16,10 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install root deps (workspaces)
+      - name: Install root deps
         run: npm ci
 
-      # Ensure web workspace devDependencies are installed (TypeScript, Vite, etc.)
+      # Make sure web has its devDependencies (TypeScript, Vite) available
       - name: Install web devDependencies
         run: npm ci -w web --include=dev
 
