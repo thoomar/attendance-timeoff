@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/vite/bin/vite.js buildnode ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/vite/bin/vite.js build vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "lucide-react": "^0.543.0",
@@ -21,7 +22,7 @@
     "@tailwindcss/forms": "^0.5.10",
     "@tailwindcss/postcss": "^4.1.13",
     "@tailwindcss/typography": "^0.5.16",
-    "@types/node": "^20",
+    "@types/node": "^20.19.13",
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^5.0.2",
