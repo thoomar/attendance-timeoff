@@ -28,7 +28,7 @@ const SITE_URL = process.env.SITE_URL || '';
 /** -------- Schemas -------- */
 const CreateReq = z.object({
     dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
-    reason: z.string().min(3)
+    reason: z.string().min(3),
 });
 
 const DecisionReq = z.object({
@@ -61,7 +61,10 @@ function assertApproversConfigured() {
 
 /** -------- Routes (relative paths; index.ts mounts at /api/time-off) -------- */
 
-// POST /api/time-off/requests
+/**
+ * POST /api/time-off/requests
+ * Creates one row per selected date.
+ */
 router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     try {
         const { dates, reason } = CreateReq.parse(req.body);
@@ -87,7 +90,9 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
 
         // Email HR/Approvers (best-effort)
         try {
-            const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length-1]}` : ''})`;
+            const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${
+                dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ''
+            })`;
             const html = buildNewRequestEmail({
                 siteUrl: SITE_URL,
                 employeeName: user.fullName || user.email,
@@ -107,7 +112,11 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     }
 });
 
-// GET /api/time-off/pending
+/**
+ * GET /api/time-off/pending
+ * If requester is an approver (email matches APPROVER_EMAILS/HR_EMAILS), return all pending.
+ * Otherwise, only this user’s pending rows.
+ */
 router.get('/pending', requireAuth, async (req: Request, res: Response) => {
     try {
         const user = getUser(req);
@@ -125,48 +134,72 @@ router.get('/pending', requireAuth, async (req: Request, res: Response) => {
                ORDER BY r.date ASC`;
 
         const { rows } = await db.query(sql, isApprover ? [] : [user.id]);
-        res.json(groupRows(rows as Array<{
-            id: string; employee_user_id: string; date: string; reason: string; status: string;
-            full_name?: string | null; email?: string | null;
-        }>));
+        res.json(
+            groupRows(
+                rows as Array<{
+                    id: string;
+                    employee_user_id: string;
+                    date: string;
+                    reason: string;
+                    status: string;
+                    full_name?: string | null;
+                    email?: string | null;
+                }>,
+            ),
+        );
     } catch (err: any) {
         res.status(400).json({ ok: false, error: err.message || 'Failed to load pending' });
     }
 });
 
-// GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+/**
+ * GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * Returns entries aggregated by employee with a dates[] array and combined status.
+ * Combined status: PENDING if any date in range is pending, else APPROVED.
+ */
 router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
-        const from = String(req.query.from || '');
-        const to = String(req.query.to || '');
+        const from = String(req.query.from || '').slice(0, 10);
+        const to = String(req.query.to || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
             return res.status(400).json({ ok: false, error: 'from/to must be YYYY-MM-DD' });
         }
 
         const sql = `
-            SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
+            SELECT
+                r.employee_user_id AS user_id,
+                u.full_name         AS user_name,
+                u.email             AS user_email,
+                ARRAY_AGG(r.date::text ORDER BY r.date) AS dates,
+                CASE WHEN BOOL_OR(r.status = 'PENDING') THEN 'PENDING' ELSE 'APPROVED' END AS status
             FROM time_off_requests r
                      LEFT JOIN users u ON u.id = r.employee_user_id
-            WHERE r.date BETWEEN $1 AND $2 AND r.status IN ('PENDING','APPROVED')
-            ORDER BY r.date ASC
+            WHERE r.date BETWEEN $1 AND $2
+              AND r.status IN ('PENDING','APPROVED')
+            GROUP BY r.employee_user_id, u.full_name, u.email
+            ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
         `;
 
         const { rows } = await db.query(sql, [from, to]);
-        const entries = (rows as Array<any>).map((r: any) => ({
-            id: r.id,
-            date: r.date,
-            status: r.status,
-            employee: r.full_name || r.email || r.employee_user_id,
-            reason: r.reason,
+
+        const entries = (rows as Array<any>).map(r => ({
+            userId: r.user_id,
+            userName: r.user_name || r.user_email || 'Employee',
+            dates: r.dates as string[],
+            status: r.status as 'PENDING' | 'APPROVED',
         }));
 
-        res.json({ entries });
+        return res.json({ entries });
     } catch (err: any) {
-        res.status(400).json({ ok: false, error: err.message || 'Failed to load calendar' });
+        console.error('calendar failed', err);
+        return res.status(500).json({ ok: false, error: 'internal_error' });
     }
 });
 
-// POST /api/time-off/decision
+/**
+ * POST /api/time-off/decision
+ * Updates one row (specific date) and emails the employee.
+ */
 router.post('/decision', requireAuth, async (req: Request, res: Response) => {
     try {
         assertApproversConfigured();
@@ -218,7 +251,7 @@ router.post('/decision', requireAuth, async (req: Request, res: Response) => {
 
 export default router;
 
-// ---- grouping helper ----
+/** -------- grouping helper for /pending -------- */
 function groupRows(rows: Array<{ id: string; employee_user_id: string; date: string; reason: string }>) {
     type K = string;
     const byEmp = new Map<K, Array<{ id: string; date: string; reason: string }>>();
