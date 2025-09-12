@@ -2,12 +2,12 @@ import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
 
-// --- tolerant import for your db module (supports named/default) ---
+// db import (tolerant)
 import * as dbmod from '../db';
 const dbQuery: (sql: string, params?: any[]) => Promise<{ rows: any[] }> =
     (dbmod as any).query ?? ((dbmod as any).default?.query?.bind((dbmod as any).default));
 
-// --- tolerant import for your email module (supports named/default) ---
+// email import (tolerant)
 import * as emailSvc from '../services/email';
 const sendEmail: (args: { to: string[]; subject: string; html: string; text?: string }) => Promise<any> =
     (emailSvc as any).sendEmail ?? (emailSvc as any).default;
@@ -16,8 +16,8 @@ import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTempl
 
 const router = express.Router();
 
-/** -------- Env / Config -------- */
-const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests_v2';
+/** Env / Config **/
+const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests_compat'; // uses your compat view over v2
 
 const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
     .split(',')
@@ -25,10 +25,9 @@ const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAIL
     .filter(Boolean);
 const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
 
-// Prefer APP_BASE_URL, fall back to SITE_URL
 const APP_BASE_URL = process.env.APP_BASE_URL || process.env.SITE_URL || '';
 
-/** -------- Schemas -------- */
+/** Schemas **/
 const CreateReq = z.object({
     dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
     reason: z.string().min(3),
@@ -39,21 +38,20 @@ const DecisionReq = z.object({
     decision: z.enum(['APPROVED', 'REJECTED']),
 });
 
-/** -------- Types from auth -------- */
+/** Types **/
 interface AuthedUser {
     id: string;
     email: string;
     fullName?: string;
-    role?: 'Employee' | 'Manager' | 'HR' | string;
+    role?: string;
 }
 
-/** -------- Helpers -------- */
+/** Helpers **/
 function getUser(req: Request): AuthedUser {
     const u = (req as any).user as AuthedUser | undefined;
     if (!u) throw new Error('Auth user missing. Ensure requireAuth is applied.');
     return u;
 }
-
 function assertApproversConfigured() {
     if (approverEmails.length === 0) {
         const err: any = new Error('No APPROVER_EMAILS/HR_EMAILS configured');
@@ -62,46 +60,35 @@ function assertApproversConfigured() {
     }
 }
 
-/** -------- Routes (mounted at /api/time-off) -------- */
+/** Routes **/
 
-/**
- * POST /api/time-off/requests
- * V2 columns: requester_user_id, request_date, reason, status
- * Returns aliased columns so clients still see employee_user_id/date.
- */
+// POST /api/time-off/requests
 router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     try {
         const { dates, reason } = CreateReq.parse(req.body);
         const user = getUser(req);
         assertApproversConfigured();
 
-        // Insert one row per date
+        // INSERT one row per date into the compat view (backed by v2)
         const values: any[] = [];
         const params: string[] = [];
-        let idx = 1;
+        let i = 1;
         for (const d of dates) {
+            // compat view exposes employee_user_id/date (maps to v2 under the hood)
             values.push(user.id, d, reason);
-            params.push(`($${idx++}, $${idx++}, $${idx++})`);
+            params.push(`($${i++}, $${i++}, $${i++})`);
         }
 
-        const insertSql = `
-            INSERT INTO ${TABLE} (requester_user_id, request_date, reason)
+        const sql = `
+            INSERT INTO ${TABLE} (employee_user_id, "date", reason)
             VALUES ${params.join(', ')}
-                RETURNING
-        id,
-        requester_user_id AS employee_user_id,
-        request_date      AS date,
-        reason,
-        status
+                RETURNING id, employee_user_id, "date", reason, status
         `;
+        const { rows } = await dbQuery(sql, values);
 
-        const { rows } = await dbQuery(insertSql, values);
-
-        // Email HR/Approvers (best-effort)
+        // Notify approvers (best-effort)
         try {
-            const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${
-                dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ''
-            })`;
+            const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ''})`;
             const html = buildNewRequestEmail({
                 siteUrl: APP_BASE_URL,
                 employeeName: user.fullName || user.email,
@@ -110,74 +97,41 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
                 dates,
             });
             await sendEmail({ to: approverEmails, subject, html });
-        } catch (err) {
-            console.error('Failed sending approver email', err);
+        } catch (e) {
+            console.error('Failed sending approver email', e);
         }
 
         res.json({ ok: true, created: rows });
     } catch (err: any) {
-        const status = err.status || 400;
-        res.status(status).json({ ok: false, error: err.message || 'Invalid request' });
+        res.status(err.status || 400).json({ ok: false, error: err.message || 'Invalid request' });
     }
 });
 
-/**
- * GET /api/time-off/pending
- * If requester is an approver, return all pending. Otherwise only the user’s own pending items.
- * Uses V2 columns and aliases to v1-style names.
- */
+// GET /api/time-off/pending
 router.get('/pending', requireAuth, async (req: Request, res: Response) => {
     try {
         const user = getUser(req);
         const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
 
         const sql = isApprover
-            ? `SELECT
-                   r.id,
-                   r.requester_user_id AS employee_user_id,
-                   r.request_date      AS date,
-            r.reason,
-            r.status,
-            u.full_name,
-            u.email
+            ? `SELECT r.id, r.employee_user_id, r."date", r.reason, r.status, u.full_name, u.email
                FROM ${TABLE} r
-                   LEFT JOIN users u ON u.id = r.requester_user_id
+                        LEFT JOIN users u ON u.id = r.employee_user_id
                WHERE r.status = 'PENDING'
-               ORDER BY r.request_date ASC`
-            : `SELECT
-                   r.id,
-                   r.requester_user_id AS employee_user_id,
-                   r.request_date      AS date,
-            r.reason,
-            r.status
+               ORDER BY r."date" ASC`
+            : `SELECT r.id, r.employee_user_id, r."date", r.reason, r.status
                FROM ${TABLE} r
-               WHERE r.requester_user_id = $1 AND r.status = 'PENDING'
-               ORDER BY r.request_date ASC`;
+               WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
+               ORDER BY r."date" ASC`;
 
         const { rows } = await dbQuery(sql, isApprover ? [] : [user.id]);
-
-        res.json(
-            groupRows(
-                rows as Array<{
-                    id: string;
-                    employee_user_id: string;
-                    date: string;
-                    reason: string;
-                    status: string;
-                    full_name?: string | null;
-                    email?: string | null;
-                }>,
-            ),
-        );
+        res.json(groupRows(rows as any[]));
     } catch (err: any) {
         res.status(400).json({ ok: false, error: err.message || 'Failed to load pending' });
     }
 });
 
-/**
- * GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
- * Aggregates by employee over V2 columns, aliasing to v1-style names.
- */
+// GET /api/time-off/calendar
 router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = String(req.query.from || '').slice(0, 10);
@@ -188,72 +142,57 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
 
         const sql = `
             SELECT
-                r.requester_user_id AS user_id,
+                r.employee_user_id AS user_id,
                 u.full_name         AS user_name,
                 u.email             AS user_email,
-                ARRAY_AGG(r.request_date::text ORDER BY r.request_date) AS dates,
+                ARRAY_AGG(r."date"::text ORDER BY r."date") AS dates,
                 CASE WHEN BOOL_OR(r.status = 'PENDING') THEN 'PENDING' ELSE 'APPROVED' END AS status
             FROM ${TABLE} r
-                     LEFT JOIN users u ON u.id = r.requester_user_id
-            WHERE r.request_date BETWEEN $1 AND $2
+                     LEFT JOIN users u ON u.id = r.employee_user_id
+            WHERE r."date" BETWEEN $1 AND $2
               AND r.status IN ('PENDING','APPROVED')
-            GROUP BY r.requester_user_id, u.full_name, u.email
-            ORDER BY COALESCE(u.full_name, u.email, r.requester_user_id::text)
+            GROUP BY r.employee_user_id, u.full_name, u.email
+            ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
         `;
-
         const { rows } = await dbQuery(sql, [from, to]);
 
-        const entries = (rows as Array<any>).map(r => ({
+        const entries = (rows as any[]).map(r => ({
             userId: r.user_id,
             userName: r.user_name || r.user_email || 'Employee',
             dates: r.dates as string[],
             status: r.status as 'PENDING' | 'APPROVED',
         }));
-
-        return res.json({ entries });
+        res.json({ entries });
     } catch (err: any) {
         console.error('calendar failed', err);
-        return res.status(500).json({ ok: false, error: 'internal_error' });
+        res.status(500).json({ ok: false, error: 'internal_error' });
     }
 });
 
-/**
- * POST /api/time-off/decision
- * Updates a single V2 row and emails the employee.
- * Only updates status + decided_at (works whether other cols exist or not).
- */
+// POST /api/time-off/decision
 router.post('/decision', requireAuth, async (req: Request, res: Response) => {
     try {
-        assertApproversConfigured();
         const user = getUser(req);
         const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
         if (!isApprover) return res.status(403).json({ ok: false, error: 'Not an approver' });
 
         const { id, decision } = DecisionReq.parse(req.body);
 
-        const updateSql = `
+        const sql = `
             UPDATE ${TABLE}
             SET status = $1, decided_at = NOW()
             WHERE id = $2 AND status = 'PENDING'
-                RETURNING
-        id,
-        requester_user_id AS employee_user_id,
-        request_date      AS date,
-        reason,
-        status
+                RETURNING id, employee_user_id, "date", reason, status
         `;
+        const { rows } = await dbQuery(sql, [decision, id]);
+        if (!rows.length) return res.status(404).json({ ok: false, error: 'Not found or already decided' });
 
-        const { rows } = await dbQuery(updateSql, [decision, id]);
-        if ((rows as Array<any>).length === 0) {
-            return res.status(404).json({ ok: false, error: 'Not found or already decided' });
-        }
-
-        const row = (rows as Array<any>)[0];
+        const row = rows[0];
 
         // Notify employee (best-effort)
         try {
             const emp = await dbQuery('SELECT full_name, email FROM users WHERE id = $1', [row.employee_user_id]);
-            const employeeEmail = (emp.rows?.[0]?.email as string) || undefined;
+            const employeeEmail = emp.rows?.[0]?.email as string | undefined;
             if (employeeEmail && typeof sendEmail === 'function') {
                 const subject = `Your time-off request for ${row.date} was ${row.status.toLowerCase()}`;
                 const html = buildDecisionEmail({
@@ -271,14 +210,13 @@ router.post('/decision', requireAuth, async (req: Request, res: Response) => {
 
         res.json({ ok: true, updated: row });
     } catch (err: any) {
-        const status = err.status || 400;
-        res.status(status).json({ ok: false, error: err.message || 'Invalid request' });
+        res.status(err.status || 400).json({ ok: false, error: err.message || 'Invalid request' });
     }
 });
 
 export default router;
 
-/** -------- grouping helper for /pending -------- */
+/** grouping helper */
 function groupRows(rows: Array<{ id: string; employee_user_id: string; date: string; reason: string }>) {
     type K = string;
     const byEmp = new Map<K, Array<{ id: string; date: string; reason: string }>>();
@@ -292,20 +230,12 @@ function groupRows(rows: Array<{ id: string; employee_user_id: string; date: str
         list.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         let cur: { employee_user_id: string; start: string; end: string; reason: string; ids: string[] } | null = null;
         for (const r of list) {
-            if (!cur) {
-                cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
-                continue;
-            }
+            if (!cur) { cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] }; continue; }
             const prev = new Date(cur.end);
             const next = new Date(r.date);
             const diffDays = (next.getTime() - prev.getTime()) / (24 * 3600 * 1000);
-            if (diffDays === 1 && r.reason === cur.reason) {
-                cur.end = r.date;
-                cur.ids.push(r.id);
-            } else {
-                out.push(cur);
-                cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
-            }
+            if (diffDays === 1 && r.reason === cur.reason) { cur.end = r.date; cur.ids.push(r.id); }
+            else { out.push(cur); cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] }; }
         }
         if (cur) out.push(cur);
     }
