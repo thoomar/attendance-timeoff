@@ -2,7 +2,6 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { requireAuth } from './auth';
 import timeOffRoutes from './routes/timeOff';
 import meRoutes from './routes/me';
 dotenv.config();

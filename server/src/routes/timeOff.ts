@@ -1,8 +1,16 @@
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
-import { db } from '../db';
-import { sendEmail } from '../services/email';
+
+// --- tolerant import for your db module (default or named) ---
+import * as dbmod from '../db';
+const db: any = (dbmod as any).db ?? (dbmod as any).default ?? dbmod;
+
+// --- tolerant import for your email module (default or named sendEmail) ---
+import * as emailSvc from '../services/email';
+const sendEmail: (args: { to: string[]; subject: string; html: string }) => Promise<any> =
+    (emailSvc as any).sendEmail ?? (emailSvc as any).default;
+
 import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTemplates';
 
 const router = express.Router();
@@ -45,18 +53,22 @@ function getUser(req: Request): AuthedUser {
 
 function assertApproversConfigured() {
     if (approverEmails.length === 0) {
-        throw Object.assign(new Error('No APPROVER_EMAILS/HR_EMAILS configured'), { status: 500 });
+        const err: any = new Error('No APPROVER_EMAILS/HR_EMAILS configured');
+        err.status = 500;
+        throw err;
     }
 }
 
-/** -------- Routes -------- */
-// Create time-off request
-router.post('/api/time-off/requests', requireAuth, async (req: Request, res: Response) => {
+/** -------- Routes (relative paths; index.ts mounts at /api/time-off) -------- */
+
+// POST /api/time-off/requests
+router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     try {
         const { dates, reason } = CreateReq.parse(req.body);
         const user = getUser(req);
         assertApproversConfigured();
 
+        // Insert one row per date
         const values: any[] = [];
         const params: string[] = [];
         let idx = 1;
@@ -66,14 +78,14 @@ router.post('/api/time-off/requests', requireAuth, async (req: Request, res: Res
         }
 
         const insertSql = `
-      INSERT INTO time_off_requests (employee_user_id, date, reason, manager_user_id)
-      VALUES ${params.join(', ')}
-      RETURNING id, employee_user_id, date, reason, status
-    `;
+            INSERT INTO time_off_requests (employee_user_id, date, reason, manager_user_id)
+            VALUES ${params.join(', ')}
+                RETURNING id, employee_user_id, date, reason, status
+        `;
 
         const { rows } = await db.query(insertSql, values);
 
-        // Email HR/Approvers
+        // Email HR/Approvers (best-effort)
         try {
             const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length-1]}` : ''})`;
             const html = buildNewRequestEmail({
@@ -95,49 +107,52 @@ router.post('/api/time-off/requests', requireAuth, async (req: Request, res: Res
     }
 });
 
-// Pending requests
-router.get('/api/time-off/pending', requireAuth, async (req: Request, res: Response) => {
+// GET /api/time-off/pending
+router.get('/pending', requireAuth, async (req: Request, res: Response) => {
     try {
         const user = getUser(req);
         const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
 
         const sql = isApprover
             ? `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
-         FROM time_off_requests r
-         LEFT JOIN users u ON u.id = r.employee_user_id
-         WHERE r.status = 'PENDING'
-         ORDER BY r.date ASC`
+               FROM time_off_requests r
+                        LEFT JOIN users u ON u.id = r.employee_user_id
+               WHERE r.status = 'PENDING'
+               ORDER BY r.date ASC`
             : `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status
-         FROM time_off_requests r
-         WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
-         ORDER BY r.date ASC`;
+               FROM time_off_requests r
+               WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
+               ORDER BY r.date ASC`;
 
         const { rows } = await db.query(sql, isApprover ? [] : [user.id]);
-        res.json(groupRows(rows));
+        res.json(groupRows(rows as Array<{
+            id: string; employee_user_id: string; date: string; reason: string; status: string;
+            full_name?: string | null; email?: string | null;
+        }>));
     } catch (err: any) {
         res.status(400).json({ ok: false, error: err.message || 'Failed to load pending' });
     }
 });
 
-// Calendar
-router.get('/api/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
+// GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = String(req.query.from || '');
         const to = String(req.query.to || '');
-        if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(from) || !/^\\d{4}-\\d{2}-\\d{2}$/.test(to)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
             return res.status(400).json({ ok: false, error: 'from/to must be YYYY-MM-DD' });
         }
 
         const sql = `
-      SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.employee_user_id
-      WHERE r.date BETWEEN $1 AND $2 AND r.status IN ('PENDING','APPROVED')
-      ORDER BY r.date ASC
-    `;
+            SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
+            FROM time_off_requests r
+                     LEFT JOIN users u ON u.id = r.employee_user_id
+            WHERE r.date BETWEEN $1 AND $2 AND r.status IN ('PENDING','APPROVED')
+            ORDER BY r.date ASC
+        `;
 
         const { rows } = await db.query(sql, [from, to]);
-        const entries = rows.map(r => ({
+        const entries = (rows as Array<any>).map((r: any) => ({
             id: r.id,
             date: r.date,
             status: r.status,
@@ -151,8 +166,8 @@ router.get('/api/time-off/calendar', requireAuth, async (req: Request, res: Resp
     }
 });
 
-// Approve/Reject
-router.post('/api/time-off/decision', requireAuth, async (req: Request, res: Response) => {
+// POST /api/time-off/decision
+router.post('/decision', requireAuth, async (req: Request, res: Response) => {
     try {
         assertApproversConfigured();
         const user = getUser(req);
@@ -162,22 +177,24 @@ router.post('/api/time-off/decision', requireAuth, async (req: Request, res: Res
         const { id, decision } = DecisionReq.parse(req.body);
 
         const updateSql = `
-      UPDATE time_off_requests
-      SET status = $1, decided_by = $2, decided_at = NOW()
-      WHERE id = $3 AND status = 'PENDING'
-      RETURNING id, employee_user_id, date, reason, status
-    `;
+            UPDATE time_off_requests
+            SET status = $1, decided_by = $2, decided_at = NOW()
+            WHERE id = $3 AND status = 'PENDING'
+                RETURNING id, employee_user_id, date, reason, status
+        `;
 
         const { rows } = await db.query(updateSql, [decision, user.id, id]);
-        if (rows.length === 0) return res.status(404).json({ ok: false, error: 'Not found or already decided' });
+        if ((rows as Array<any>).length === 0) {
+            return res.status(404).json({ ok: false, error: 'Not found or already decided' });
+        }
 
-        const row = rows[0];
+        const row = (rows as Array<any>)[0];
 
-        // Notify employee
+        // Notify employee (best-effort)
         try {
             const emp = await db.query('SELECT full_name, email FROM users WHERE id = $1', [row.employee_user_id]);
-            const employeeEmail = emp.rows?.[0]?.email as string | undefined;
-            if (employeeEmail) {
+            const employeeEmail = (emp.rows?.[0]?.email as string) || undefined;
+            if (employeeEmail && typeof sendEmail === 'function') {
                 const subject = `Your time-off request for ${row.date} was ${row.status.toLowerCase()}`;
                 const html = buildDecisionEmail({
                     siteUrl: SITE_URL,
@@ -202,18 +219,18 @@ router.post('/api/time-off/decision', requireAuth, async (req: Request, res: Res
 export default router;
 
 // ---- grouping helper ----
-function groupRows(rows: any[]) {
+function groupRows(rows: Array<{ id: string; employee_user_id: string; date: string; reason: string }>) {
     type K = string;
-    const byEmp = new Map<K, any[]>();
+    const byEmp = new Map<K, Array<{ id: string; date: string; reason: string }>>();
     for (const r of rows) {
         const k = r.employee_user_id;
         if (!byEmp.has(k)) byEmp.set(k, []);
-        byEmp.get(k)!.push(r);
+        byEmp.get(k)!.push({ id: r.id, date: r.date, reason: r.reason });
     }
-    const out: any[] = [];
+    const out: Array<{ employee_user_id: string; start: string; end: string; reason: string; ids: string[] }> = [];
     for (const [emp, list] of byEmp) {
-        list.sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        let cur: any | null = null;
+        list.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        let cur: { employee_user_id: string; start: string; end: string; reason: string; ids: string[] } | null = null;
         for (const r of list) {
             if (!cur) {
                 cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
@@ -221,8 +238,8 @@ function groupRows(rows: any[]) {
             }
             const prev = new Date(cur.end);
             const next = new Date(r.date);
-            const diff = (next.getTime() - prev.getTime()) / (24*3600*1000);
-            if (diff === 1 && r.reason === cur.reason) {
+            const diffDays = (next.getTime() - prev.getTime()) / (24 * 3600 * 1000);
+            if (diffDays === 1 && r.reason === cur.reason) {
                 cur.end = r.date;
                 cur.ids.push(r.id);
             } else {
