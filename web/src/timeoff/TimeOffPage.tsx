@@ -5,27 +5,37 @@ import { z } from 'zod';
 import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal } from 'lucide-react';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
-type Role = 'Enrollment Specialist'|'Senior Contract Specialist'|'Manager'|'Admin';
+type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
 type User = { id: string; name: string; role: Role };
-type PendingItem = { id: string; dates: string[]; reason: string; employee_name: string; employee_email: string };
-type CalendarEntry = { dates: string[]; initials?: string; full_name?: string; reason?: string };
+
+// Server calendar entry shape
+type CalendarEntry = { userId: string; userName: string; dates: string[]; status: 'PENDING' | 'APPROVED' };
+
+// We’ll normalize “pending” into this UI-friendly item
+type PendingUIItem = {
+    id: string;                 // single request id (per date)
+    employeeName?: string;
+    employeeEmail?: string;
+    date: string;               // one date
+    reason: string;
+};
 
 export default function TimeOffPage() {
     const [user, setUser] = useState<User | null>(null);
     const [selected, setSelected] = useState<Date[]>([]);
     const [reason, setReason] = useState('');
     const [submitting, setSubmitting] = useState(false);
-    const [pending, setPending] = useState<PendingItem[]>([]);
+    const [pending, setPending] = useState<PendingUIItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
 
-    // NEW: Zoho connection gate
+    // Zoho connection gate
     const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
     useEffect(() => {
         fetch('/api/zoho/status')
             .then(r => r.json())
             .then(d => {
                 setZohoConnected(!!d.connected);
-                // If arriving from the portal with ?connected=zoho and not connected yet, kick off OAuth
+                // If arriving with ?connected=zoho and not connected yet, kick off OAuth
                 const params = new URLSearchParams(location.search);
                 if (!d.connected && params.get('connected') === 'zoho') {
                     location.href = '/api/zoho/connect?returnTo=' + encodeURIComponent(location.pathname);
@@ -34,37 +44,115 @@ export default function TimeOffPage() {
             .catch(() => setZohoConnected(false));
     }, []);
 
-    useEffect(() => { fetch('/api/me').then(r=>r.json()).then(setUser); }, []);
     useEffect(() => {
-        const from = new Date(); const to = new Date(); to.setMonth(to.getMonth()+2);
-        fetch(`/api/time-off/calendar?from=${from.toISOString().slice(0,10)}&to=${to.toISOString().slice(0,10)}`)
-            .then(r=>r.json()).then(d=>setCalendar(d.entries||[]));
+        fetch('/api/me').then(r => r.json()).then(setUser);
     }, []);
+
     useEffect(() => {
-        if (user && (user.role === 'Manager' || user.role === 'Admin')) {
-            fetch('/api/time-off/pending').then(r=>r.json()).then(setPending);
+        const from = new Date();
+        const to = new Date();
+        to.setMonth(to.getMonth() + 2);
+        const qs = `from=${from.toISOString().slice(0, 10)}&to=${to.toISOString().slice(0, 10)}`;
+        fetch(`/api/time-off/calendar?${qs}`)
+            .then(r => r.json())
+            .then(d => setCalendar(Array.isArray(d.entries) ? d.entries : []))
+            .catch(() => setCalendar([]));
+    }, []);
+
+    useEffect(() => {
+        if (!user) return;
+        if (user.role === 'Manager' || user.role === 'Admin') {
+            fetch('/api/time-off/pending')
+                .then(r => r.json())
+                .then((raw: any) => {
+                    // Normalize either grouped response or flat items
+                    // Grouped example item: { employee_user_id, start, end, reason, ids: [...] }
+                    // Flat example item: { id, employee_user_id, date, reason, status, full_name?, email? }
+                    const out: PendingUIItem[] = [];
+                    if (Array.isArray(raw)) {
+                        for (const item of raw) {
+                            if (Array.isArray(item?.ids) && (item.start || item.end)) {
+                                // expand group into one row per id; dates not provided individually, so derive from range
+                                // we can’t derive each exact date without querying; instead we’ll show a single action per id with the group’s reason
+                                // If you want exact per-id dates, adjust the API to also return date[] alongside ids[]
+                                for (const id of item.ids) {
+                                    out.push({
+                                        id,
+                                        employeeName: item.full_name ?? undefined,
+                                        employeeEmail: item.email ?? undefined,
+                                        date: (item.start ?? '').slice(0, 10) + (item.end && item.end !== item.start ? ` – ${String(item.end).slice(0, 10)}` : ''),
+                                        reason: item.reason ?? '',
+                                    });
+                                }
+                            } else if (item?.id) {
+                                out.push({
+                                    id: item.id,
+                                    employeeName: item.full_name ?? undefined,
+                                    employeeEmail: item.email ?? undefined,
+                                    date: (item.date ?? '').slice(0, 10),
+                                    reason: item.reason ?? '',
+                                });
+                            }
+                        }
+                    }
+                    setPending(out);
+                })
+                .catch(() => setPending([]));
         }
     }, [user]);
 
-    const isRequester = useMemo(() => !['Manager','Admin'].includes(user?.role || ''), [user]);
+    const isRequester = useMemo(() => !['Manager', 'Admin'].includes(user?.role || ''), [user]);
 
     async function submit() {
         try {
             const parsed = CreateReq.parse({ dates: selected, reason });
             setSubmitting(true);
-            const body = { dates: parsed.dates.map(d=>d.toISOString().slice(0,10)), reason };
-            const res = await fetch('/api/time-off', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
-            if (!res.ok) throw new Error(await res.text());
-            setSelected([]); setReason('');
+            const body = { dates: parsed.dates.map(d => d.toISOString().slice(0, 10)), reason };
+
+            const res = await fetch('/api/time-off/requests', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (!res.ok) {
+                // Try JSON error first, then text (may be HTML "Cannot POST ..." page)
+                const ct = res.headers.get('content-type') || '';
+                const msg = ct.includes('application/json') ? (await res.json()).error || JSON.stringify(await res.json())
+                    : await res.text();
+                throw new Error(typeof msg === 'string' ? msg : 'Failed to submit');
+            }
+
+            setSelected([]);
+            setReason('');
             alert('Request submitted!');
-        } catch (e:any) {
-            alert(e.message || 'Failed to submit');
-        } finally { setSubmitting(false); }
+        } catch (e: any) {
+            alert(e?.message || 'Failed to submit');
+        } finally {
+            setSubmitting(false);
+        }
     }
 
-    async function decide(id:string, decision:'APPROVED'|'REJECTED'){
-        const res = await fetch(`/api/time-off/${id}/decision`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ decision }) });
-        if (res.ok) setPending(p => p.filter(i => i.id !== id));
+    async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
+        try {
+            const res = await fetch(`/api/time-off/decision`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, decision }),
+            });
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt);
+            }
+            setPending(p => p.filter(i => i.id !== id));
+            // Optionally refresh calendar to reflect approvals
+            // (not strictly necessary; uncomment if you want instant reflect)
+            // const now = new Date(); const to = new Date(); to.setMonth(to.getMonth()+2);
+            // const qs = `from=${now.toISOString().slice(0,10)}&to=${to.toISOString().slice(0,10)}`;
+            // fetch(`/api/time-off/calendar?${qs}`).then(r=>r.json()).then(d=>setCalendar(d.entries || []));
+        } catch (e: any) {
+            alert(e?.message || 'Failed to update');
+        }
     }
 
     // Loading states
@@ -117,7 +205,7 @@ export default function TimeOffPage() {
                         <DayPicker
                             mode="multiple"
                             selected={selected}
-                            onSelect={(val)=>setSelected(val || [])}
+                            onSelect={(val) => setSelected(val || [])}
                             disabled={{ before: new Date() }}
                             className="rdp"
                         />
@@ -127,16 +215,16 @@ export default function TimeOffPage() {
                 <textarea
                     placeholder="Reason"
                     value={reason}
-                    onChange={(e)=>setReason(e.target.value)}
+                    onChange={(e) => setReason(e.target.value)}
                     className="w-full min-h-24 rounded-xl border border-slate-700 bg-slate-900 p-3"
                 />
                                 <div className="flex items-center justify-between">
                                     <div className="text-sm text-slate-400">
-                                        {selected.length} day{selected.length===1?'':'s'} selected
+                                        {selected.length} day{selected.length === 1 ? '' : 's'} selected
                                     </div>
                                     <button
                                         onClick={submit}
-                                        disabled={submitting || selected.length===0 || reason.length<3}
+                                        disabled={submitting || selected.length === 0 || reason.trim().length < 3}
                                         className="btn-primary disabled:opacity-50 disabled:pointer-events-none"
                                     >
                                         <SendHorizonal className="h-4 w-4" />
@@ -157,19 +245,24 @@ export default function TimeOffPage() {
                             <div className="text-sm text-slate-400">Nothing scheduled yet.</div>
                         ) : (
                             <ul className="space-y-3">
-                                {calendar.map((e, i) => (
-                                    <li key={i} className="flex items-start gap-3 text-sm">
-                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 text-slate-200">
-                      {e.initials ?? '✓'}
-                    </span>
-                                        <div className="space-y-0.5">
-                                            {e.full_name && <div className="font-medium">{e.full_name}</div>}
-                                            <div className="text-slate-300">
-                                                {e.dates.join(', ')}{e.reason ? <span className="text-slate-400"> — {e.reason}</span> : null}
+                                {calendar.map((e, i) => {
+                                    const initials =
+                                        e.userName?.split(/\s+/).map(p => p[0]).join('').slice(0, 2).toUpperCase() || '✓';
+                                    return (
+                                        <li key={i} className="flex items-start gap-3 text-sm">
+                      <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 text-slate-200">
+                        {initials}
+                      </span>
+                                            <div className="space-y-0.5">
+                                                {e.userName && <div className="font-medium">{e.userName}</div>}
+                                                <div className="text-slate-300">
+                                                    {e.dates.join(', ')}{' '}
+                                                    {e.status === 'PENDING' ? <span className="text-amber-400">(pending)</span> : null}
+                                                </div>
                                             </div>
-                                        </div>
-                                    </li>
-                                ))}
+                                        </li>
+                                    );
+                                })}
                             </ul>
                         )}
                     </aside>
@@ -189,21 +282,20 @@ export default function TimeOffPage() {
                                     <li key={p.id} className="rounded-xl border border-slate-800 p-4">
                                         <div className="flex items-center justify-between">
                                             <div className="font-semibold">
-                                                {p.employee_name}{' '}
-                                                <span className="text-slate-400 text-sm">({p.employee_email})</span>
+                                                {p.employeeName ?? 'Employee'}{' '}
+                                                {p.employeeEmail ? <span className="text-slate-400 text-sm">({p.employeeEmail})</span> : null}
                                             </div>
                                             <div className="text-xs text-slate-400">
-                                                {p.dates.length} day{p.dates.length===1?'':'s'}
+                                                {p.date || '—'}
                                             </div>
                                         </div>
-                                        <div className="text-sm text-slate-200 mt-1">Dates: {p.dates.join(', ')}</div>
-                                        <div className="text-sm text-slate-200 mb-3">Reason: {p.reason}</div>
+                                        <div className="text-sm text-slate-200 mb-3">Reason: {p.reason || '—'}</div>
                                         <div className="flex gap-2">
-                                            <button onClick={()=>decide(p.id,'APPROVED')} className="btn-primary">
+                                            <button onClick={() => decide(p.id, 'APPROVED')} className="btn-primary">
                                                 <CheckCircle2 className="h-4 w-4" />
                                                 Approve
                                             </button>
-                                            <button onClick={()=>decide(p.id,'REJECTED')} className="btn">
+                                            <button onClick={() => decide(p.id, 'REJECTED')} className="btn">
                                                 Reject
                                             </button>
                                         </div>
