@@ -17,7 +17,7 @@ import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTempl
 const router = express.Router();
 
 /** Env / Config **/
-const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests_compat'; // uses your compat view over v2
+const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests_compat'; // view over v2
 
 const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
     .split(',')
@@ -69,12 +69,11 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
         const user = getUser(req);
         assertApproversConfigured();
 
-        // INSERT one row per date into the compat view (backed by v2)
+        // one row per date (compat view exposes employee_user_id/"date")
         const values: any[] = [];
         const params: string[] = [];
         let i = 1;
         for (const d of dates) {
-            // compat view exposes employee_user_id/date (maps to v2 under the hood)
             values.push(user.id, d, reason);
             params.push(`($${i++}, $${i++}, $${i++})`);
         }
@@ -86,7 +85,7 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
         `;
         const { rows } = await dbQuery(sql, values);
 
-        // Notify approvers (best-effort)
+        // email approvers (best-effort)
         try {
             const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ''})`;
             const html = buildNewRequestEmail({
