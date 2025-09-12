@@ -1,138 +1,236 @@
-import { Router } from 'express';
+import express, { Request, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../db';
-import { requireAuth, requireRole } from '../auth';
-import { sendTimeOffEmail } from '../services/email';
-import { createCalendarEntry } from '../services/calendar';
+import { requireAuth } from '../auth';
+import { db } from '../db';
+import { sendEmail } from '../services/email';
+import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTemplates';
 
-const r = Router();
+const router = express.Router();
 
+/** -------- Env / Config -------- */
+const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
+
+const DEFAULT_MANAGER_USER_ID = process.env.DEFAULT_MANAGER_USER_ID || null;
+const SITE_URL = process.env.SITE_URL || '';
+
+/** -------- Schemas -------- */
 const CreateReq = z.object({
-    dates: z.array(z.string()).min(1),
-    reason: z.string().min(3).max(2000)
-});
-
-r.post('/', requireAuth, async (req, res) => {
-    const parsed = CreateReq.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-    const { dates, reason } = parsed.data;
-
-    if (['Manager','Admin'].includes(req.user.role)) {
-        return res.status(403).json({ error: 'Managers/Admins cannot file requests' });
-    }
-
-    // ensure manager exists
-    const { rows: mgrs } = await query(
-        'SELECT id, email, full_name FROM users WHERE id = $1',
-        [req.user.managerUserId]
-    );
-    if (mgrs.length === 0) return res.status(400).json({ error: 'Manager not set for user' });
-
-    const { rows } = await query(
-        `
-            INSERT INTO time_off_requests (requester_user_id, manager_user_id, dates, reason)
-            VALUES ($1,$2,$3::date[],$4)
-                RETURNING id, status
-        `,
-        [req.user.id, req.user.managerUserId, dates, reason]
-    );
-
-    await sendTimeOffEmail('NEW_REQUEST', { requestId: rows[0].id, requester: req.user.email });
-    res.json(rows[0]);
-});
-
-r.get('/my', requireAuth, async (req, res) => {
-    const { rows } = await query(
-        `
-            SELECT id, dates, reason, status, created_at
-            FROM time_off_requests
-            WHERE requester_user_id = $1
-            ORDER BY created_at DESC
-        `,
-        [req.user.id]
-    );
-    res.json(rows);
-});
-
-r.get('/calendar', requireAuth, async (req, res) => {
-    const { from, to } = req.query as any;
-    const { rows } = await query(
-        `
-            SELECT tor.id, tor.dates, u.full_name, tor.reason, tor.status
-            FROM time_off_requests tor
-                     JOIN users u ON u.id = tor.requester_user_id
-            WHERE EXISTS (
-                SELECT 1 FROM unnest(tor.dates) d
-                WHERE d BETWEEN $1::date AND $2::date
-            ) AND tor.status = 'APPROVED'
-        `,
-        [from, to]
-    );
-
-    if (['Manager','Admin'].includes(req.user.role)) {
-        return res.json({ entries: rows });
-    }
-    const redacted = rows.map((r: any) => ({
-        dates: r.dates,
-        initials: (r.full_name || '').split(' ').map((s: string) => s[0]).join('')
-    }));
-    res.json({ entries: redacted });
-});
-
-r.get('/pending', requireAuth, requireRole(['Manager','Admin']), async (req, res) => {
-    const { rows } = await query(
-        `
-            SELECT tor.id, tor.dates, tor.reason, tor.created_at,
-                   u.full_name AS employee_name, u.email AS employee_email
-            FROM time_off_requests tor
-                     JOIN users u ON u.id = tor.requester_user_id
-            WHERE tor.manager_user_id = $1 AND tor.status = 'PENDING'
-            ORDER BY tor.created_at ASC
-        `,
-        [req.user.id]
-    );
-    res.json(rows);
+    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
+    reason: z.string().min(3)
 });
 
 const DecisionReq = z.object({
-    decision: z.enum(['APPROVED','REJECTED']),
-    manager_comment: z.string().max(2000).optional()
+    id: z.string().uuid(),
+    decision: z.enum(['APPROVED', 'REJECTED']),
 });
 
-r.patch('/:id/decision', requireAuth, requireRole(['Manager','Admin']), async (req, res) => {
-    const parsed = DecisionReq.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-    const { id } = req.params;
-    const { decision, manager_comment } = parsed.data;
+/** -------- Types from auth -------- */
+interface AuthedUser {
+    id: string;
+    email: string;
+    fullName?: string;
+    role?: 'Employee' | 'Manager' | 'HR' | string;
+}
 
-    const { rows } = await query(
-        `
-            UPDATE time_off_requests
-            SET status = $1, manager_comment = $2, decided_at = now()
-            WHERE id = $3 AND manager_user_id = $4 AND status = 'PENDING'
-                RETURNING *
-        `,
-        [decision, manager_comment ?? null, id, req.user.id]
-    );
+/** -------- Helpers -------- */
+function getUser(req: Request): AuthedUser {
+    const u = (req as any).user as AuthedUser | undefined;
+    if (!u) throw new Error('Auth user missing. Ensure requireAuth is applied.');
+    return u;
+}
 
-    if (rows.length === 0) return res.status(404).json({ error: 'Not found or not pending' });
-    const tor = rows[0];
-
-    if (decision === 'APPROVED') {
-        const dates: string[] = tor.dates;
-        const min = dates.reduce((a,b)=> a < b ? a : b);
-        const max = dates.reduce((a,b)=> a > b ? a : b);
-        await createCalendarEntry({
-            requestId: tor.id,
-            startDate: min,
-            endDate: max,
-            summary: `${tor.requester_user_id} PTO`
-        });
-        await sendTimeOffEmail('APPROVED', { tor });
-    } else {
-        await sendTimeOffEmail('REJECTED', { tor });
+function assertApproversConfigured() {
+    if (approverEmails.length === 0) {
+        throw Object.assign(new Error('No APPROVER_EMAILS/HR_EMAILS configured'), { status: 500 });
     }
-    res.json({ id: tor.id, status: tor.status });
+}
+
+/** -------- Routes -------- */
+// Create time-off request
+router.post('/api/time-off/requests', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const { dates, reason } = CreateReq.parse(req.body);
+        const user = getUser(req);
+        assertApproversConfigured();
+
+        const values: any[] = [];
+        const params: string[] = [];
+        let idx = 1;
+        for (const d of dates) {
+            values.push(user.id, d, reason, DEFAULT_MANAGER_USER_ID);
+            params.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++})`);
+        }
+
+        const insertSql = `
+      INSERT INTO time_off_requests (employee_user_id, date, reason, manager_user_id)
+      VALUES ${params.join(', ')}
+      RETURNING id, employee_user_id, date, reason, status
+    `;
+
+        const { rows } = await db.query(insertSql, values);
+
+        // Email HR/Approvers
+        try {
+            const subject = `Time-Off Request: ${user.fullName || user.email} (${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length-1]}` : ''})`;
+            const html = buildNewRequestEmail({
+                siteUrl: SITE_URL,
+                employeeName: user.fullName || user.email,
+                employeeEmail: user.email,
+                reason,
+                dates,
+            });
+            await sendEmail({ to: approverEmails, subject, html });
+        } catch (err) {
+            console.error('Failed sending approver email', err);
+        }
+
+        res.json({ ok: true, created: rows });
+    } catch (err: any) {
+        const status = err.status || 400;
+        res.status(status).json({ ok: false, error: err.message || 'Invalid request' });
+    }
 });
 
-export default r;
+// Pending requests
+router.get('/api/time-off/pending', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const user = getUser(req);
+        const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
+
+        const sql = isApprover
+            ? `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
+         FROM time_off_requests r
+         LEFT JOIN users u ON u.id = r.employee_user_id
+         WHERE r.status = 'PENDING'
+         ORDER BY r.date ASC`
+            : `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status
+         FROM time_off_requests r
+         WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
+         ORDER BY r.date ASC`;
+
+        const { rows } = await db.query(sql, isApprover ? [] : [user.id]);
+        res.json(groupRows(rows));
+    } catch (err: any) {
+        res.status(400).json({ ok: false, error: err.message || 'Failed to load pending' });
+    }
+});
+
+// Calendar
+router.get('/api/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const from = String(req.query.from || '');
+        const to = String(req.query.to || '');
+        if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(from) || !/^\\d{4}-\\d{2}-\\d{2}$/.test(to)) {
+            return res.status(400).json({ ok: false, error: 'from/to must be YYYY-MM-DD' });
+        }
+
+        const sql = `
+      SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.employee_user_id
+      WHERE r.date BETWEEN $1 AND $2 AND r.status IN ('PENDING','APPROVED')
+      ORDER BY r.date ASC
+    `;
+
+        const { rows } = await db.query(sql, [from, to]);
+        const entries = rows.map(r => ({
+            id: r.id,
+            date: r.date,
+            status: r.status,
+            employee: r.full_name || r.email || r.employee_user_id,
+            reason: r.reason,
+        }));
+
+        res.json({ entries });
+    } catch (err: any) {
+        res.status(400).json({ ok: false, error: err.message || 'Failed to load calendar' });
+    }
+});
+
+// Approve/Reject
+router.post('/api/time-off/decision', requireAuth, async (req: Request, res: Response) => {
+    try {
+        assertApproversConfigured();
+        const user = getUser(req);
+        const isApprover = approverEmails.some(e => e.toLowerCase() === user.email.toLowerCase());
+        if (!isApprover) return res.status(403).json({ ok: false, error: 'Not an approver' });
+
+        const { id, decision } = DecisionReq.parse(req.body);
+
+        const updateSql = `
+      UPDATE time_off_requests
+      SET status = $1, decided_by = $2, decided_at = NOW()
+      WHERE id = $3 AND status = 'PENDING'
+      RETURNING id, employee_user_id, date, reason, status
+    `;
+
+        const { rows } = await db.query(updateSql, [decision, user.id, id]);
+        if (rows.length === 0) return res.status(404).json({ ok: false, error: 'Not found or already decided' });
+
+        const row = rows[0];
+
+        // Notify employee
+        try {
+            const emp = await db.query('SELECT full_name, email FROM users WHERE id = $1', [row.employee_user_id]);
+            const employeeEmail = emp.rows?.[0]?.email as string | undefined;
+            if (employeeEmail) {
+                const subject = `Your time-off request for ${row.date} was ${row.status.toLowerCase()}`;
+                const html = buildDecisionEmail({
+                    siteUrl: SITE_URL,
+                    employeeName: emp.rows?.[0]?.full_name || employeeEmail,
+                    date: row.date,
+                    decision: row.status,
+                    reason: row.reason,
+                });
+                await sendEmail({ to: [employeeEmail], subject, html });
+            }
+        } catch (e) {
+            console.error('Failed sending decision email', e);
+        }
+
+        res.json({ ok: true, updated: row });
+    } catch (err: any) {
+        const status = err.status || 400;
+        res.status(status).json({ ok: false, error: err.message || 'Invalid request' });
+    }
+});
+
+export default router;
+
+// ---- grouping helper ----
+function groupRows(rows: any[]) {
+    type K = string;
+    const byEmp = new Map<K, any[]>();
+    for (const r of rows) {
+        const k = r.employee_user_id;
+        if (!byEmp.has(k)) byEmp.set(k, []);
+        byEmp.get(k)!.push(r);
+    }
+    const out: any[] = [];
+    for (const [emp, list] of byEmp) {
+        list.sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        let cur: any | null = null;
+        for (const r of list) {
+            if (!cur) {
+                cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
+                continue;
+            }
+            const prev = new Date(cur.end);
+            const next = new Date(r.date);
+            const diff = (next.getTime() - prev.getTime()) / (24*3600*1000);
+            if (diff === 1 && r.reason === cur.reason) {
+                cur.end = r.date;
+                cur.ids.push(r.id);
+            } else {
+                out.push(cur);
+                cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
+            }
+        }
+        if (cur) out.push(cur);
+    }
+    return out;
+}
