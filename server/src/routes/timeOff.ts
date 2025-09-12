@@ -2,13 +2,29 @@ import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
 
-// --- tolerant import for your db module (default or named) ---
-import * as dbmod from '../db';
-const db: any = (dbmod as any).db ?? (dbmod as any).default ?? dbmod;
+/**
+ * If you are using the v2 physical table, create a compatibility view so the SQL below works unchanged:
+ *
+ *   create or replace view time_off_requests as
+ *   select
+ *     id,
+ *     requester_user_id as employee_user_id,
+ *     request_date       as date,
+ *     status,
+ *     reason
+ *   from time_off_requests_v2;
+ *
+ * Then set TIME_OFF_TABLE=time_off_requests (the view).
+ */
 
-// --- tolerant import for your email module (default or named sendEmail) ---
+// --- tolerant import for your db module (supports named/default) ---
+import * as dbmod from '../db';
+const dbQuery: (sql: string, params?: any[]) => Promise<{ rows: any[] }> =
+    (dbmod as any).query ?? ((dbmod as any).default?.query?.bind((dbmod as any).default));
+
+// --- tolerant import for your email module (supports named/default) ---
 import * as emailSvc from '../services/email';
-const sendEmail: (args: { to: string[]; subject: string; html: string }) => Promise<any> =
+const sendEmail: (args: { to: string[]; subject: string; html: string; text?: string }) => Promise<any> =
     (emailSvc as any).sendEmail ?? (emailSvc as any).default;
 
 import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTemplates';
@@ -16,14 +32,17 @@ import { buildNewRequestEmail, buildDecisionEmail } from '../services/emailTempl
 const router = express.Router();
 
 /** -------- Env / Config -------- */
+const TABLE = process.env.TIME_OFF_TABLE || 'time_off_requests';
+
 const RAW_APPROVER_EMAILS = (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+
 const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
 
-const DEFAULT_MANAGER_USER_ID = process.env.DEFAULT_MANAGER_USER_ID || null;
-const SITE_URL = process.env.SITE_URL || '';
+// Prefer APP_BASE_URL, fall back to SITE_URL
+const APP_BASE_URL = process.env.APP_BASE_URL || process.env.SITE_URL || '';
 
 /** -------- Schemas -------- */
 const CreateReq = z.object({
@@ -59,11 +78,14 @@ function assertApproversConfigured() {
     }
 }
 
-/** -------- Routes (relative paths; index.ts mounts at /api/time-off) -------- */
+/** -------- Routes (mounted at /api/time-off) -------- */
 
 /**
  * POST /api/time-off/requests
  * Creates one row per selected date.
+ * Works with:
+ *  - v1 table (employee_user_id, date, reason, status)
+ *  - a v2 compatibility view mapping requester_user_id→employee_user_id, request_date→date
  */
 router.post('/requests', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -76,17 +98,17 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
         const params: string[] = [];
         let idx = 1;
         for (const d of dates) {
-            values.push(user.id, d, reason, DEFAULT_MANAGER_USER_ID);
-            params.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++})`);
+            values.push(user.id, d, reason);
+            params.push(`($${idx++}, $${idx++}, $${idx++})`);
         }
 
         const insertSql = `
-            INSERT INTO time_off_requests (employee_user_id, date, reason, manager_user_id)
+            INSERT INTO ${TABLE} (employee_user_id, date, reason)
             VALUES ${params.join(', ')}
                 RETURNING id, employee_user_id, date, reason, status
         `;
 
-        const { rows } = await db.query(insertSql, values);
+        const { rows } = await dbQuery(insertSql, values);
 
         // Email HR/Approvers (best-effort)
         try {
@@ -94,7 +116,7 @@ router.post('/requests', requireAuth, async (req: Request, res: Response) => {
                 dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ''
             })`;
             const html = buildNewRequestEmail({
-                siteUrl: SITE_URL,
+                siteUrl: APP_BASE_URL,
                 employeeName: user.fullName || user.email,
                 employeeEmail: user.email,
                 reason,
@@ -124,16 +146,16 @@ router.get('/pending', requireAuth, async (req: Request, res: Response) => {
 
         const sql = isApprover
             ? `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status, u.full_name, u.email
-               FROM time_off_requests r
+               FROM ${TABLE} r
                         LEFT JOIN users u ON u.id = r.employee_user_id
                WHERE r.status = 'PENDING'
                ORDER BY r.date ASC`
             : `SELECT r.id, r.employee_user_id, r.date, r.reason, r.status
-               FROM time_off_requests r
+               FROM ${TABLE} r
                WHERE r.employee_user_id = $1 AND r.status = 'PENDING'
                ORDER BY r.date ASC`;
 
-        const { rows } = await db.query(sql, isApprover ? [] : [user.id]);
+        const { rows } = await dbQuery(sql, isApprover ? [] : [user.id]);
         res.json(
             groupRows(
                 rows as Array<{
@@ -172,7 +194,7 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
                 u.email             AS user_email,
                 ARRAY_AGG(r.date::text ORDER BY r.date) AS dates,
                 CASE WHEN BOOL_OR(r.status = 'PENDING') THEN 'PENDING' ELSE 'APPROVED' END AS status
-            FROM time_off_requests r
+            FROM ${TABLE} r
                      LEFT JOIN users u ON u.id = r.employee_user_id
             WHERE r.date BETWEEN $1 AND $2
               AND r.status IN ('PENDING','APPROVED')
@@ -180,7 +202,7 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
             ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
         `;
 
-        const { rows } = await db.query(sql, [from, to]);
+        const { rows } = await dbQuery(sql, [from, to]);
 
         const entries = (rows as Array<any>).map(r => ({
             userId: r.user_id,
@@ -199,6 +221,7 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
 /**
  * POST /api/time-off/decision
  * Updates one row (specific date) and emails the employee.
+ * Note: We only update status + decided_at to stay compatible with both v1 and a v2 view.
  */
 router.post('/decision', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -210,13 +233,13 @@ router.post('/decision', requireAuth, async (req: Request, res: Response) => {
         const { id, decision } = DecisionReq.parse(req.body);
 
         const updateSql = `
-            UPDATE time_off_requests
-            SET status = $1, decided_by = $2, decided_at = NOW()
-            WHERE id = $3 AND status = 'PENDING'
+            UPDATE ${TABLE}
+            SET status = $1, decided_at = NOW()
+            WHERE id = $2 AND status = 'PENDING'
                 RETURNING id, employee_user_id, date, reason, status
         `;
 
-        const { rows } = await db.query(updateSql, [decision, user.id, id]);
+        const { rows } = await dbQuery(updateSql, [decision, id]);
         if ((rows as Array<any>).length === 0) {
             return res.status(404).json({ ok: false, error: 'Not found or already decided' });
         }
@@ -225,12 +248,12 @@ router.post('/decision', requireAuth, async (req: Request, res: Response) => {
 
         // Notify employee (best-effort)
         try {
-            const emp = await db.query('SELECT full_name, email FROM users WHERE id = $1', [row.employee_user_id]);
+            const emp = await dbQuery('SELECT full_name, email FROM users WHERE id = $1', [row.employee_user_id]);
             const employeeEmail = (emp.rows?.[0]?.email as string) || undefined;
             if (employeeEmail && typeof sendEmail === 'function') {
                 const subject = `Your time-off request for ${row.date} was ${row.status.toLowerCase()}`;
                 const html = buildDecisionEmail({
-                    siteUrl: SITE_URL,
+                    siteUrl: APP_BASE_URL,
                     employeeName: emp.rows?.[0]?.full_name || employeeEmail,
                     date: row.date,
                     decision: row.status,
@@ -274,7 +297,7 @@ function groupRows(rows: Array<{ id: string; employee_user_id: string; date: str
             const diffDays = (next.getTime() - prev.getTime()) / (24 * 3600 * 1000);
             if (diffDays === 1 && r.reason === cur.reason) {
                 cur.end = r.date;
-                cur.ids.push(r.id);
+                cur!.ids.push(r.id);
             } else {
                 out.push(cur);
                 cur = { employee_user_id: emp, start: r.date, end: r.date, reason: r.reason, ids: [r.id] };
