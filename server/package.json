@@ -17,7 +17,7 @@
     "express": "^4.19.2",
     "pg": "^8.16.3",
     "zod": "^3.23.8",
-    "nodemailer": "^6.9.13"
+    "nodemailer": "^6.10.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
