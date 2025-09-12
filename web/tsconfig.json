@@ -5,14 +5,15 @@
     "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
 
-    "composite": true,
-    "incremental": true,
-    "outDir": "./.tsbuild",
-    "tsBuildInfoFile": "./.tsbuild/.tsbuildinfo"
+    "noEmit": true,
+    "types": ["vite/client"],
+    "isolatedModules": true,
+    "moduleDetection": "force"
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }
