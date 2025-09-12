@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "npx -y typescript@5.9.2 tsc --noEmit",
-    "build": "npx -y typescript@5.9.2 tsc --noEmit && npx -y vite@5.4.20 build",
+    "typecheck": "npm exec -y -p typescript@5.9.2 tsc --noEmit",
+    "build": "npm run typecheck && npm exec -y -p vite@5.4.20 vite build",
     "dev": "vite",
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "build-local": "tsc --noEmit && vite build"
   },
   "dependencies": {
     "lucide-react": "^0.543.0",
