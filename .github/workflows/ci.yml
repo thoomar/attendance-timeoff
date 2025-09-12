@@ -16,7 +16,7 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install deps
+      - name: Install deps (workspace root)
         run: npm ci
 
       - name: Build server
