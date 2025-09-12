@@ -1,13 +1,13 @@
 export function buildNewRequestEmail(args: {
-    siteUrl: string;
-    employeeName: string;
-    employeeEmail: string;
-    reason: string;
-    dates: string[];
+  siteUrl: string;
+  employeeName: string;
+  employeeEmail: string;
+  reason: string;
+  dates: string[];
 }) {
-    const { siteUrl, employeeName, employeeEmail, reason, dates } = args;
-    const range = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]}` : dates[0];
-    return `
+  const { siteUrl, employeeName, employeeEmail, reason, dates } = args;
+  const range = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]}` : dates[0];
+  return `
   <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; line-height:1.5;">
     <h2>New Time-Off Request</h2>
     <p><strong>Employee:</strong> ${escapeHtml(employeeName)} (${escapeHtml(employeeEmail)})</p>
@@ -19,14 +19,14 @@ export function buildNewRequestEmail(args: {
 }
 
 export function buildDecisionEmail(args: {
-    siteUrl: string;
-    employeeName: string;
-    date: string;
-    decision: 'APPROVED' | 'REJECTED' | string;
-    reason: string;
+  siteUrl: string;
+  employeeName: string;
+  date: string;
+  decision: 'APPROVED' | 'REJECTED' | string;
+  reason: string;
 }) {
-    const { siteUrl, employeeName, date, decision, reason } = args;
-    return `
+  const { siteUrl, employeeName, date, decision, reason } = args;
+  return `
   <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; line-height:1.5;">
     <h2>Time-Off ${escapeHtml(String(decision))}</h2>
     <p>Hi ${escapeHtml(employeeName)},</p>
@@ -39,10 +39,10 @@ export function buildDecisionEmail(args: {
 
 // No replaceAll — works on ES2019+
 function escapeHtml(s: string) {
-    return String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

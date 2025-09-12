@@ -10,19 +10,14 @@ import {
 
 const router = express.Router();
 
-// Utility: decode base64url JSON state { r: returnTo, u: userId }
-
-function b64urlToBuffer(s: string) {
-  // convert base64url -> base64 + proper padding
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
-  const pad = s.length % 4;
-  if (pad) s += '='.repeat(4 - pad);
-  return Buffer.from(s, 'base64');
-}
-
+/**
+ * Decode base64url JSON state of shape { r: returnTo, u: userId }
+ * Returns {} on failure.
+ */
 function decodeState(raw?: string): { r?: string; u?: string } {
   if (!raw) return {};
   try {
+    // Node 18+ supports "base64url"
     const json = Buffer.from(raw, 'base64url').toString('utf8');
     return JSON.parse(json);
   } catch {
@@ -30,40 +25,53 @@ function decodeState(raw?: string): { r?: string; u?: string } {
   }
 }
 
-// GET /api/zoho/status
-// Returns { connected: boolean } for the current user
+/**
+ * GET /api/zoho/status
+ * Returns { connected: boolean } for the current authenticated user.
+ */
 router.get('/status', requireAuth, async (req: Request, res: Response) => {
-  const userId = (req as any).user?.id;
-  if (!userId) return res.json({ connected: false });
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) return res.json({ connected: false });
 
-  const q = `
-    SELECT 1
-      FROM zoho_tokens
-     WHERE user_id = $1
-       AND COALESCE(refresh_token, '') <> ''
-     LIMIT 1
-  `;
-  const r = await pool.query(q, [userId]);
-  const connected = (r.rowCount ?? 0) > 0;
-  res.json({ connected });
+    const q = `
+      SELECT 1
+        FROM zoho_tokens
+       WHERE user_id = $1
+         AND COALESCE(refresh_token, '') <> ''
+       LIMIT 1
+    `;
+    const r = await pool.query(q, [userId]);
+    const connected = (r.rowCount ?? 0) > 0;
+    return res.json({ connected });
+  } catch (e: any) {
+    return res.status(500).json({ connected: false, error: e?.message || 'status_error' });
+  }
 });
 
-// GET /api/zoho/connect?returnTo=/whatever
-// Builds Zoho authorize URL and 302 redirects
+/**
+ * GET /api/zoho/connect?returnTo=/whatever
+ * Builds Zoho authorize URL with a base64url-encoded state and 302 redirects there.
+ */
 router.get('/connect', requireAuth, (req: Request, res: Response) => {
-  const returnTo = (req.query.returnTo as string) || '/';
-  const userId = (req as any).user.id;
+  try {
+    const returnTo = (req.query.returnTo as string) || '/';
+    const userId = (req as any).user.id as string;
 
-  // Encode state with base64url so it survives round-trip
-  const stateObj = { r: returnTo, u: userId };
-  const state = Buffer.from(JSON.stringify(stateObj)).toString('base64url');
+    const stateObj = { r: returnTo, u: userId };
+    const state = Buffer.from(JSON.stringify(stateObj)).toString('base64url');
 
-  const url = authorizeUrl(state);
-  return res.redirect(302, url);
+    const url = authorizeUrl(state);
+    return res.redirect(302, url);
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message || 'connect_error' });
+  }
 });
 
-// GET /api/zoho/callback?code=...&state=...
-// NOTE: no requireAuth here — we trust userId from the signed/opaque `state`
+/**
+ * GET /api/zoho/callback?code=...&state=...
+ * NOTE: no requireAuth here — user identity comes from signed/opaque `state` (and we also accept an authenticated user if present).
+ */
 router.get('/callback', async (req: Request, res: Response) => {
   try {
     const code = req.query.code as string | undefined;
@@ -71,33 +79,34 @@ router.get('/callback', async (req: Request, res: Response) => {
     if (!code) return res.status(400).send('Missing code');
 
     const state = decodeState(stateRaw);
-    const userId = (req as any).user?.id || state.u;   // prefer auth if present
+    // Prefer req.user if middleware already set it; otherwise fall back to state.u
+    const userId = (req as any).user?.id || state.u;
     const returnTo = state.r || '/';
-
     if (!userId) return res.status(401).send('Unauthenticated');
 
-    // Exchange code for tokens
+    // Exchange authorization code for tokens
     const token = await exchangeCodeForToken(code);
 
-    // Optional: pull Zoho user info (helpful for audits)
+    // Try to fetch Zoho user info (optional, but nice for audits)
     let zohoUserId: string | null = null;
     try {
       const me = await fetchZohoUser(token.access_token);
-      zohoUserId = me?.users?.[0]?.id ?? null;
+      // Align with whatever shape your fetchZohoUser returns
+      zohoUserId = (me?.users?.[0]?.id ?? me?.id ?? null) as string | null;
     } catch {
-      // ignore; not critical
+      // Non-fatal
     }
 
-    // Persist tokens
+    // Persist tokens (you can also upsert per user)
     await saveZohoTokens({
-      userId,
+      userId: String(userId),
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
-      expiresAt: new Date(Date.now() + (token.expires_in - 60) * 1000),
+      expiresAt: new Date(Date.now() + Math.max(0, (token.expires_in ?? 3600) - 60) * 1000),
       zohoUserId
     });
 
-    // Back to the app
+    // Head back to the app
     return res.redirect(returnTo);
   } catch (err: any) {
     console.error('Zoho callback error:', err?.message || err);
