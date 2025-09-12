@@ -1,30 +1,21 @@
-name: CI
+- uses: actions/setup-node@v4
+  with:
+    node-version: 20
+    cache: npm
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
+- name: Install root deps
+  run: npm ci
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# NEW: ensure server workspace deps (incl. dev) are present for the build
+- name: Install server deps
+  run: npm ci -w server --include=dev
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+- name: Build server
+  run: npm run -w server build
 
-      - name: Install root deps
-        run: npm ci
+# Already doing this for web; keep it
+- name: Install web devDependencies
+  run: npm ci -w web --include=dev
 
-      # Make sure web has its devDependencies (TypeScript, Vite) available
-      - name: Install web devDependencies
-        run: npm ci -w web --include=dev
-
-      - name: Build server
-        run: npm run -w server build
-
-      - name: Build web
-        run: npm run -w web build
+- name: Build web
+  run: npm run -w web build
