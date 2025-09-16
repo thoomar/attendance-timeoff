@@ -1,13 +1,12 @@
 // server/src/routes/zoho.ts
 import express, { Request, Response } from 'express';
-import { exchangeCodeForToken, saveZohoTokens, refreshAccessToken } from '../services/zoho';
+import { exchangeCodeForToken, saveZohoTokens } from '../services/zoho';
 
 const router = express.Router();
 
 const {
-    // Zoho accounts base for OAuth (adjust per region)
+    // Adjust for your region if needed
     ZOHO_ACCOUNTS_BASE = 'https://accounts.zoho.com',
-    // Zoho API base for CRM calls (adjust per region)
     ZOHO_API_BASE = 'https://www.zohoapis.com',
     ZOHO_CLIENT_ID = '',
     ZOHO_CLIENT_SECRET = '',
@@ -16,7 +15,7 @@ const {
     APP_BASE_URL = 'https://timeoff.timesharehelpcenter.com',
 } = process.env;
 
-/** Simple logger for Zoho flow */
+/** Simple logger */
 function logZoho(label: string, data: unknown) {
     try {
         // eslint-disable-next-line no-console
@@ -27,7 +26,7 @@ function logZoho(label: string, data: unknown) {
     }
 }
 
-/** Build the Zoho OAuth authorize URL (no dependency on services/zoho) */
+/** Build Zoho OAuth authorize URL (no dependency on services) */
 function buildAuthorizeUrl(): string {
     const qp = new URLSearchParams({
         response_type: 'code',
@@ -40,18 +39,16 @@ function buildAuthorizeUrl(): string {
     return `${ZOHO_ACCOUNTS_BASE}/oauth/v2/auth?${qp.toString()}`;
 }
 
-/** Fetch current Zoho user using the access token (CRM v2 CurrentUser) */
+/** Fetch current Zoho user via CRM API (CurrentUser) */
 async function fetchCurrentZohoUser(accessToken: string, apiBase: string = ZOHO_API_BASE) {
-    const url = `${apiBase}/crm/v2/users?type=CurrentUser`;
-    const res = await fetch(url, {
-        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
-    });
+    const base = apiBase.replace(/\/+$/, '');
+    const url = `${base}/crm/v2/users?type=CurrentUser`;
 
+    const res = await fetch(url, { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } });
     if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`fetchCurrentZohoUser ${res.status}: ${text || res.statusText}`);
     }
-
     const data = (await res.json()) as any;
     const user = Array.isArray(data.users) && data.users.length > 0 ? data.users[0] : null;
     if (!user) throw new Error('fetchCurrentZohoUser: no user payload');
@@ -59,15 +56,14 @@ async function fetchCurrentZohoUser(accessToken: string, apiBase: string = ZOHO_
     return {
         zohoUserId: String(user.id),
         email: user.email || null,
-        fullName: user.full_name || user.full_name || null,
+        fullName: user.full_name || null,
     };
 }
 
 /** 1) Start OAuth */
 router.get('/start', (_req: Request, res: Response) => {
     try {
-        const url = buildAuthorizeUrl();
-        return res.redirect(url);
+        return res.redirect(buildAuthorizeUrl());
     } catch (e: any) {
         logZoho('start:error', { message: e?.message, stack: e?.stack });
         return res.status(500).json({ ok: false, error: e?.message || 'Failed to create Zoho authorize URL' });
@@ -88,50 +84,40 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     try {
-        // Exchange code → tokens (your services export: exchangeCodeForToken)
-        const tokens = await exchangeCodeForToken(code, {
-            clientId: ZOHO_CLIENT_ID,
-            clientSecret: ZOHO_CLIENT_SECRET,
-            redirectUri: ZOHO_REDIRECT_URI,
-            accountsBase: ZOHO_ACCOUNTS_BASE,
-        });
-        // Expected minimal shape:
-        // { access_token: string, refresh_token?: string, expires_in: number, token_type?: string, scope?: string, api_domain?: string }
+        // Exchange code → tokens (your service expects only the code)
+        const tokens = await exchangeCodeForToken(code);
+        // Expected: { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string; }
 
         if (!tokens?.access_token) {
             logZoho('callback:token_exchange_missing_access', tokens as any);
             return res.status(400).send('Callback error');
         }
 
-        const apiBase = (tokens as any).api_domain
-            ? `${(tokens as any).api_domain.replace(/\/+$/, '')}/crm/v2`
-            : `${ZOHO_API_BASE}/crm/v2`;
+        // Identify current user with the fresh access token
+        // Prefer api_domain if present; fall back to ZOHO_API_BASE
+        const apiDomain = (tokens as any)?.api_domain as string | undefined;
+        const apiBase = apiDomain && apiDomain.startsWith('http') ? apiDomain : ZOHO_API_BASE;
+        const me = await fetchCurrentZohoUser(tokens.access_token, apiBase);
 
-        // Get current user id using fresh access token
-        const me = await fetchCurrentZohoUser(tokens.access_token, apiBase.replace(/\/crm\/v2$/, ''));
         if (!me?.zohoUserId) {
             logZoho('callback:missing_user_id', me as any);
             return res.status(400).send('Callback error');
         }
 
-        // Compute expiry
+        // Compute token expiry
         const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
 
-        // Persist tokens (your services export: saveZohoTokens)
+        // Persist the minimal, known-safe input for your SaveTokensInput type
         await saveZohoTokens({
             zohoUserId: String(me.zohoUserId),
-            email: me.email ?? null,
-            fullName: me.fullName ?? null,
             accessToken: tokens.access_token,
-            refreshToken: (tokens as any).refresh_token ?? null,
+            refreshToken: (tokens as any)?.refresh_token ?? null,
             scope: tokens.scope ?? ZOHO_SCOPES,
             tokenType: tokens.token_type ?? 'Bearer',
-            apiDomain: (tokens as any).api_domain ?? null,
             expiresAt,
-            raw: tokens as unknown as Record<string, unknown>,
         });
 
-        // Set a simple cookie so UI knows it’s connected (optional)
+        // Optional cookie to let UI know we’re connected
         res.cookie('zoho_connected', '1', {
             httpOnly: true,
             sameSite: 'lax',
@@ -140,10 +126,10 @@ router.get('/callback', async (req: Request, res: Response) => {
             path: '/',
         });
 
-        // Redirect to app root (no query params to avoid loops)
+        // Clean redirect (no params) to avoid loops
         return res.redirect(APP_BASE_URL);
     } catch (e: any) {
-        // Typical causes: invalid_code, redirect URI mismatch, wrong region, bad client creds, DB schema issues
+        // Common causes: invalid_code, redirect URI mismatch, wrong region, bad client creds, DB schema
         logZoho('callback:exception', { message: e?.message, stack: e?.stack });
         return res.status(400).send('Callback error');
     }
