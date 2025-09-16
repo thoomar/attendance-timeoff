@@ -12,9 +12,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    # Force dev installs everywhere (beats any .npmrc or env that sets production)
     env:
+      # Ensure devDeps are installed, even if an .npmrc or env tries to omit them
       NPM_CONFIG_PRODUCTION: "false"
       NODE_ENV: development
 
@@ -31,22 +30,19 @@ jobs:
             server/package-lock.json
             web/package-lock.json
 
-      # Belt + suspenders: ensure no workspace-level .npmrc flips production=true
-      - name: Neutralize .npmrc (root + workspaces)
+      # Neutralize any production-only installs from .npmrc files
+      - name: Force dev installs
         run: |
           echo "production=false" > .npmrc
-          if [ -f server/.npmrc ]; then sed -i 's/^production=.*$/production=false/' server/.npmrc || true; fi
-          if [ -f web/.npmrc ]; then sed -i 's/^production=.*$/production=false/' web/.npmrc || true; fi
-          echo "omit=" >> .npmrc   # clear omit flags if any
+          if [ -f server/.npmrc ]; then sed -i 's/^production=.*/production=false/' server/.npmrc || true; fi
+          if [ -f web/.npmrc ]; then sed -i 's/^production=.*/production=false/' web/.npmrc || true; fi
 
-      - name: Show npm config (debug)
-        run: npm config list -l
+      # 🔑 Install deps for root + all workspaces (includes devDependencies)
+      - name: Install dependencies (root + workspaces)
+        run: |
+          npm ci --include=dev --include-workspace-root --workspaces
 
-      # Install ALL deps (including dev) across workspaces
-      - name: Install dependencies (all workspaces)
-        run: npm ci --workspaces --include=dev
-
-      # Verify key dev deps are present
+      # Optional: prove globals & eslint are present
       - name: Verify ESLint deps
         run: |
           node -e "console.log('globals version:', require('globals/package.json').version)"
@@ -58,7 +54,7 @@ jobs:
       - name: Typecheck (web)
         run: npm run -w web typecheck --if-present
 
-      # Lint from repo root (uses root eslint.config.mjs)
+      # Lint from root (uses eslint.config.mjs at root)
       - name: Lint (root)
         run: npm run lint --if-present
 
