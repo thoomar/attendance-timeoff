@@ -12,6 +12,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Ensure devDeps are installed, even if an .npmrc or env tries to omit them
+      NPM_CONFIG_PRODUCTION: "false"
+      NODE_ENV: development
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,33 +25,46 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # Cache all workspaces by listing their lockfiles
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
             web/package-lock.json
 
-      # Install ALL workspace deps (including dev) once
-      - name: Install dependencies (all workspaces)
-        run: npm ci --workspaces --include=dev
+      # Neutralize any production-only installs from .npmrc files
+      - name: Force dev installs
+        run: |
+          echo "production=false" > .npmrc
+          if [ -f server/.npmrc ]; then sed -i 's/^production=.*/production=false/' server/.npmrc || true; fi
+          if [ -f web/.npmrc ]; then sed -i 's/^production=.*/production=false/' web/.npmrc || true; fi
 
-      # Optional: fast sanity checks
+      # 🔑 Install deps for root + all workspaces (includes devDependencies)
+      - name: Install dependencies (root + workspaces)
+        run: |
+          npm ci --include=dev --include-workspace-root --workspaces
+
+      # Optional: prove globals & eslint are present
+      - name: Verify ESLint deps
+        run: |
+          node -e "console.log('globals version:', require('globals/package.json').version)"
+          npx eslint -v
+
+      # Typecheck
       - name: Typecheck (server)
         run: npm run -w server typecheck --if-present
       - name: Typecheck (web)
         run: npm run -w web typecheck --if-present
+
+      # Lint from root (uses eslint.config.mjs at root)
       - name: Lint (root)
         run: npm run lint --if-present
 
-      # Build server
+      # Build
       - name: Build server
         run: npm run -w server build
-
-      # Build web
       - name: Build web
         run: npm run -w web build
 
-      # (Optional) Upload artifacts so you can download built bundles from the CI run
+      # Artifacts
       - name: Upload server build
         if: success()
         uses: actions/upload-artifact@v4
