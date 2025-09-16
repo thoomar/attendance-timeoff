@@ -1,4 +1,4 @@
-// eslint.config.js (root)
+// eslint.config.js
 import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
@@ -7,7 +7,7 @@ export default [
     // Ignore build artifacts
     { ignores: ["**/dist/**", "**/node_modules/**", "web/dist/**"] },
 
-    // Base TS/TSX linting (no type-checking)
+    // Base TS/TSX linting
     {
         files: ["**/*.{ts,tsx}"],
         languageOptions: {
@@ -22,11 +22,11 @@ export default [
         plugins: { "@typescript-eslint": tseslint.plugin },
         rules: {
             ...js.configs.recommended.rules,
-            ...tseslint.configs.recommended.rules, // safe default rules
+            ...tseslint.configs.recommended.rules,
         },
     },
 
-    // Server: enable type-checked rules using server/tsconfig.json
+    // Server: enable type-checked rules
     {
         files: ["server/**/*.ts"],
         languageOptions: {
@@ -41,7 +41,7 @@ export default [
         },
     },
 
-    // Web: enable type-checked rules using web/tsconfig.json
+    // Web: enable type-checked rules
     {
         files: ["web/src/**/*.{ts,tsx}"],
         languageOptions: {
