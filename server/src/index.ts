@@ -1,10 +1,11 @@
-import zohoRoutes from './routes/zoho';
 
-import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import timeOffRoutes from './routes/timeOff';
+import express from 'express';
+
 import meRoutes from './routes/me';
+import timeOffRoutes from './routes/timeOff';
+import zohoRoutes from './routes/zoho';
 
 dotenv.config();
 

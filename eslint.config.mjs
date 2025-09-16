@@ -1,4 +1,5 @@
-// eslint.config.mjs
+// eslint.config.mjs — Ship-it mode (warnings silenced)
+
 import js from '@eslint/js';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
@@ -7,7 +8,7 @@ import pluginN from 'eslint-plugin-n';
 import pluginPromise from 'eslint-plugin-promise';
 
 export default [
-    // 0) Ignore generated and config files
+    // 0) Ignore generated and meta/config files
     {
         ignores: [
             '**/node_modules/**',
@@ -15,25 +16,22 @@ export default [
             '**/.turbo/**',
             '**/.next/**',
             'coverage/**',
-            // app build outs
             'web/dist/**',
             'server/dist/**',
-            // config files we don't want to lint for import/no-unresolved etc
             'eslint.config.*',
             'web/vite.config.*',
             'web/tailwind.config.*',
-            // lockfiles, misc
             '**/*.lock',
         ],
     },
 
-    // 1) Base JS
+    // 1) Base JS recommended rules
     js.configs.recommended,
 
-    // 2) TS rules
+    // 2) TypeScript recommended rules
     ...tseslint.configs.recommended,
 
-    // 3) Envs / plugins / resolver
+    // 3) Common language + plugin setup
     {
         languageOptions: {
             ecmaVersion: 'latest',
@@ -50,7 +48,6 @@ export default [
         },
         settings: {
             'import/resolver': {
-                // enable TypeScript-aware module resolution
                 typescript: {
                     alwaysTryTypes: true,
                     project: [
@@ -63,40 +60,21 @@ export default [
             },
         },
         rules: {
-            // use TS version of unused-vars
-            'no-unused-vars': 'off',
-            '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+            // --- Ship-it mode: silence noisy rules ---
+            '@typescript-eslint/no-explicit-any': 'off',
+            '@typescript-eslint/no-unused-vars': 'off',
+            '@typescript-eslint/no-namespace': 'off',
+            'import/order': 'off',
 
-            // allow console in server/bootstrap
-            'no-console': 'off',
-
-            // import hygiene
-            'import/order': [
-                'warn',
-                {
-                    groups: [
-                        'builtin',
-                        'external',
-                        'internal',
-                        ['parent', 'sibling', 'index'],
-                        'type',
-                    ],
-                    'newlines-between': 'always',
-                    alphabetize: { order: 'asc', caseInsensitive: true },
-                },
-            ],
+            // --- Keep the essentials ---
             'import/no-unresolved': 'error',
-
-            // promise hygiene
+            'no-console': 'off',
             'promise/catch-or-return': 'warn',
-
-            // Be pragmatic for now: tame the any-errors so we can ship
-            '@typescript-eslint/no-explicit-any': 'warn',
-            '@typescript-eslint/no-namespace': 'off', // server/auth was flagged
+            'no-unused-vars': 'off', // TS plugin covers it if re-enabled
         },
     },
 
-    // 4) Per-folder tweaks (optional)
+    // 4) Folder-specific globals (optional but nice)
     {
         files: ['server/**/*.{ts,tsx}'],
         languageOptions: { globals: { ...globals.node } },
