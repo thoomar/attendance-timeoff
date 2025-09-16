@@ -1,3 +1,4 @@
+// server/src/routes/zoho.ts
 import express, { Request, Response } from 'express';
 import { exchangeCodeForToken, saveZohoTokens } from '../services/zoho';
 
@@ -17,10 +18,7 @@ const {
 function logZoho(label: string, data: unknown) {
     try {
         // eslint-disable-next-line no-console
-        console.error(
-            `[ZOHO] ${label}:`,
-            typeof data === 'string' ? data : JSON.stringify(data)
-        );
+        console.error(`[ZOHO] ${label}:`, typeof data === 'string' ? data : JSON.stringify(data));
     } catch {
         // eslint-disable-next-line no-console
         console.error(`[ZOHO] ${label} (unstringifiable)`);
@@ -87,8 +85,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     try {
         // Exchange code → tokens (service expects only the code)
         const tokens = await exchangeCodeForToken(code);
-        // Expected minimal shape:
-        // { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string }
+        // Expected: { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string }
 
         if (!tokens?.access_token) {
             logZoho('callback:token_exchange_missing_access', tokens as any);
@@ -109,12 +106,11 @@ router.get('/callback', async (req: Request, res: Response) => {
         // Compute expiry
         const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
 
-        // Persist tokens — only fields allowed by SaveTokensInput
+        // Persist tokens — only fields allowed by your SaveTokensInput type
         await saveZohoTokens({
             zohoUserId: String(me.zohoUserId),
             accessToken: tokens.access_token,
             refreshToken: (tokens as any)?.refresh_token ?? null,
-            tokenType: tokens.token_type ?? 'Bearer',
             expiresAt,
         });
 
