@@ -1,22 +1,26 @@
-# dependencies
+# Node
 node_modules/
-# env
-*.env
-.env
-server/.env
-# build outputs
-dist/
-server/dist/
-web/dist/
-# logs
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-# editor/OS
+yarn-error.log
+pnpm-debug.log
+*.tsbuildinfo
+
+# Build outputs
+dist/
+web/dist/
+
+# Env & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS/Editor
 .DS_Store
 .idea/
 .vscode/
-*.zip
-*.tsbuildinfo
-web/src/timeoff/TimeOffPage.backup.tsx
+
+# Logs
+logs/
+*.log
+pm2.log

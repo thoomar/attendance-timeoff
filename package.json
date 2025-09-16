@@ -12,5 +12,11 @@
     "start": "npm -w server start",
     "format": "npm -w server run format && npm -w web run format",
     "lint": "npm -w server run lint && npm -w web run lint"
+  },
+  "dependencies": {
+    "body-parser": "1.20.3",
+    "express": "4.21.2",
+    "iconv-lite": "0.6.3",
+    "raw-body": "2.5.2"
   }
 }

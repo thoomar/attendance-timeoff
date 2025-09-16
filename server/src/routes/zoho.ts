@@ -1,116 +1,202 @@
+// src/routes/zoho.ts
 import express, { Request, Response } from 'express';
-import { requireAuth } from '../auth';
-import { pool } from '../db';
 import {
-  authorizeUrl,          // builds the Zoho /oauth/v2/auth URL
-  exchangeCodeForToken,  // exchanges code -> { access_token, refresh_token, expires_in }
-  fetchZohoUser,         // fetches current Zoho user (optional)
-  saveZohoTokens         // persists tokens into zoho_tokens
+  getZohoAuthorizeUrl,
+  exchangeCodeForTokens,
+  getCurrentZohoUserId,
+  upsertZohoTokens,
+  selectTokensExpiringWithin,
+  refreshAccessToken,
+  updateAccessTokenById,
 } from '../services/zoho';
+import { db } from '../db';
 
 const router = express.Router();
 
-/**
- * Decode base64url JSON state of shape { r: returnTo, u: userId }
- * Returns {} on failure.
- */
-function decodeState(raw?: string): { r?: string; u?: string } {
-  if (!raw) return {};
-  try {
-    // Node 18+ supports "base64url"
-    const json = Buffer.from(raw, 'base64url').toString('utf8');
-    return JSON.parse(json);
-  } catch {
-    return {};
-  }
+const {
+  ZOHO_SCOPES = 'ZohoCRM.modules.ALL ZohoCRM.settings.ALL AaaServer.profile.Read',
+  CRON_SECRET,
+  FRONTEND_REDIRECT_SUCCESS,
+  FRONTEND_REDIRECT_ERROR,
+} = process.env;
+
+type TokenCountsRow = {
+  active: string;
+  revoked: string;
+  soon_expiring: string;
+};
+
+const toInt = (s: string | number | null | undefined) =>
+  typeof s === 'number' ? s : s ? parseInt(String(s), 10) : 0;
+
+function wantsJson(req: Request): boolean {
+  const a = (req.get('accept') || '').toLowerCase();
+  return a.includes('application/json') || a.includes('json') || (req.query.format === 'json');
 }
 
-/**
- * GET /api/zoho/status
- * Returns { connected: boolean } for the current authenticated user.
- */
-router.get('/status', requireAuth, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id as string | undefined;
-    if (!userId) return res.json({ connected: false });
+function successTarget(req: Request): string {
+  // Default to root if not set in env
+  return FRONTEND_REDIRECT_SUCCESS || (req.headers?.origin as string) || '/';
+}
 
-    const q = `
-      SELECT 1
-        FROM zoho_tokens
-       WHERE user_id = $1
-         AND COALESCE(refresh_token, '') <> ''
-       LIMIT 1
-    `;
-    const r = await pool.query(q, [userId]);
-    const connected = (r.rowCount ?? 0) > 0;
-    return res.json({ connected });
+function errorTarget(req: Request, reason?: string): string {
+  const base = FRONTEND_REDIRECT_ERROR || '/?zohoError=1';
+  if (!reason) return base;
+  // Append a short reason param (avoid long URLs)
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}reason=${encodeURIComponent(reason).slice(0, 80)}`;
+}
+
+/** 0) CONNECT helper — some clients call /connect instead of /start */
+router.get('/connect', (req: Request, res: Response) => {
+  try {
+    const url = getZohoAuthorizeUrl(process.env.ZOHO_SCOPES || ZOHO_SCOPES);
+    if (wantsJson(req)) return res.json({ ok: true, authUrl: url });
+    return res.redirect(url);
   } catch (e: any) {
-    return res.status(500).json({ connected: false, error: e?.message || 'status_error' });
+    const msg = e?.message ?? String(e);
+    if (wantsJson(req)) return res.status(500).json({ ok: false, error: msg });
+    return res.status(500).send(msg);
   }
 });
 
-/**
- * GET /api/zoho/connect?returnTo=/whatever
- * Builds Zoho authorize URL with a base64url-encoded state and 302 redirects there.
- */
-router.get('/connect', requireAuth, (req: Request, res: Response) => {
+/** 1) Start OAuth explicitly (kept for backwards-compat) */
+router.get('/start', (_req: Request, res: Response) => {
   try {
-    const returnTo = (req.query.returnTo as string) || '/';
-    const userId = (req as any).user.id as string;
-
-    const stateObj = { r: returnTo, u: userId };
-    const state = Buffer.from(JSON.stringify(stateObj)).toString('base64url');
-
-    const url = authorizeUrl(state);
-    return res.redirect(302, url);
+    const url = getZohoAuthorizeUrl(process.env.ZOHO_SCOPES || ZOHO_SCOPES);
+    return res.redirect(url);
   } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e?.message || 'connect_error' });
+    return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
   }
 });
 
-/**
- * GET /api/zoho/callback?code=...&state=...
- * NOTE: no requireAuth here — user identity comes from signed/opaque `state` (and we also accept an authenticated user if present).
- */
-router.get('/callback', async (req: Request, res: Response) => {
+/** 2) OAuth callback: accept both /callback and /callback/, then redirect (or JSON for XHR) */
+router.get(['/callback', '/callback/'], async (req: Request, res: Response) => {
   try {
-    const code = req.query.code as string | undefined;
-    const stateRaw = req.query.state as string | undefined;
-    if (!code) return res.status(400).send('Missing code');
-
-    const state = decodeState(stateRaw);
-    // Prefer req.user if middleware already set it; otherwise fall back to state.u
-    const userId = (req as any).user?.id || state.u;
-    const returnTo = state.r || '/';
-    if (!userId) return res.status(401).send('Unauthenticated');
-
-    // Exchange authorization code for tokens
-    const token = await exchangeCodeForToken(code);
-
-    // Try to fetch Zoho user info (optional, but nice for audits)
-    let zohoUserId: string | null = null;
-    try {
-      const me = await fetchZohoUser(token.access_token);
-      // Align with whatever shape your fetchZohoUser returns
-      zohoUserId = (me?.users?.[0]?.id ?? me?.id ?? null) as string | null;
-    } catch {
-      // Non-fatal
+    const code = String(req.query.code ?? '');
+    if (!code) {
+      if (wantsJson(req)) return res.status(400).json({ ok: false, error: 'Missing ?code' });
+      return res.redirect(302, errorTarget(req, 'missing_code'));
     }
 
-    // Persist tokens (you can also upsert per user)
-    await saveZohoTokens({
-      userId: String(userId),
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token,
-      expiresAt: new Date(Date.now() + Math.max(0, (token.expires_in ?? 3600) - 60) * 1000),
-      zohoUserId
+    const tokens = await exchangeCodeForTokens(code);
+    const zohoUserId = await getCurrentZohoUserId(tokens.accessToken, tokens.apiDomain);
+
+    await upsertZohoTokens({
+      zohoUserId,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+      apiDomain: tokens.apiDomain,
+      tokenType: tokens.tokenType,
+      scope: tokens.scope ?? (process.env.ZOHO_SCOPES || ZOHO_SCOPES),
     });
 
-    // Head back to the app
-    return res.redirect(returnTo);
-  } catch (err: any) {
-    console.error('Zoho callback error:', err?.message || err);
-    return res.status(500).send('Callback error');
+    // Success
+    if (!wantsJson(req)) {
+      // Important: do NOT append any query params — redirect verbatim.
+      return res.redirect(302, successTarget(req));
+    }
+    return res.json({ ok: true, zohoUserId });
+
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (!wantsJson(req)) {
+      return res.redirect(302, errorTarget(req, 'zoho_callback'));
+    }
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** 3) Cron refresh: refresh tokens expiring within a window */
+router.get('/cron/refresh', async (req: Request, res: Response) => {
+  try {
+    if (!CRON_SECRET) return res.status(500).json({ ok: false, error: 'CRON_SECRET not set' });
+    const secret = String(req.query.secret ?? '');
+    if (secret !== CRON_SECRET) return res.status(403).json({ ok: false, error: 'Invalid secret' });
+
+    const windowMins = Math.max(1, parseInt(String(req.query.windowMins ?? '60'), 10));
+    const expiring = await selectTokensExpiringWithin(windowMins);
+
+    let refreshed = 0;
+    const items: Array<{ id: string; ok: boolean; skipped?: boolean; error?: string }> = [];
+
+    for (const t of expiring) {
+      try {
+        if (!t.refresh_token) {
+          items.push({ id: t.id, ok: true, skipped: true });
+          continue;
+        }
+        const next = await refreshAccessToken(t.refresh_token, t.api_domain ?? undefined);
+        await updateAccessTokenById(t.id, next.accessToken, next.expiresAt);
+        refreshed++;
+        items.push({ id: t.id, ok: true });
+      } catch (err: any) {
+        items.push({ id: t.id, ok: false, error: err?.message ?? String(err) });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      windowMins,
+      checked: expiring.length,
+      refreshed,
+      errors: items.filter(i => !i.ok && !i.skipped).length,
+      items,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/** 4) Status: counts (active, revoked, soon-expiring in 60m) */
+router.get('/status', async (_req: Request, res: Response) => {
+  try {
+    const q = await db.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE revoked IS NOT TRUE) AS active,
+        COUNT(*) FILTER (WHERE revoked IS TRUE)     AS revoked,
+        COUNT(*) FILTER (
+          WHERE revoked IS NOT TRUE
+            AND expires_at IS NOT NULL
+            AND expires_at < (NOW() + INTERVAL '60 minutes')
+        ) AS soon_expiring
+      FROM zoho_tokens;
+      `
+    );
+
+    const row = (q.rows?.[0] || {}) as TokenCountsRow;
+    return res.json({
+      ok: true,
+      counts: {
+        active: toInt(row.active),
+        revoked: toInt(row.revoked),
+        soon_expiring: toInt(row.soon_expiring),
+      },
+    });
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/** 5) Simple “me” probe via granted token (uses CRM fallback under the hood) */
+router.get('/me', async (_req: Request, res: Response) => {
+  try {
+    const q = await db.query(
+      `SELECT access_token, api_domain
+         FROM zoho_tokens
+        WHERE revoked IS NOT TRUE
+        ORDER BY created_at DESC
+        LIMIT 1`
+    );
+    const row = q.rows?.[0];
+    if (!row) return res.status(404).json({ ok: false, error: 'No active token' });
+
+    const id = await getCurrentZohoUserId(row.access_token, row.api_domain || undefined);
+    return res.json({ ok: true, userId: id });
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message ?? String(e) });
   }
 });
 

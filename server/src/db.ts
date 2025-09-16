@@ -1,32 +1,40 @@
-import 'dotenv/config';
-import { Pool, type QueryResultRow } from 'pg';
+// src/db.ts
+import { Pool } from 'pg';
 
-function buildConnectionString(): string {
-  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-  if (url) return url;
+const {
+  DATABASE_URL,
+  PGHOST,
+  PGPORT,
+  PGDATABASE,
+  PGUSER,
+  PGPASSWORD,
+  PGSSL,
+} = process.env;
 
-  const user = process.env.PGUSER ?? 'app';
-  const pass = process.env.PGPASSWORD ?? 'app';
-  const host = process.env.PGHOST ?? '127.0.0.1';
-  const port = process.env.PGPORT ?? '5433';  // default to 5433
-  const db   = process.env.PGDATABASE ?? 'attendance';
-  return `postgres://${user}:${pass}@${host}:${port}/${db}`;
+const pool =
+  DATABASE_URL
+    ? new Pool({
+        connectionString: DATABASE_URL,
+        ssl: shouldUseSSL(),
+      })
+    : new Pool({
+        host: PGHOST || 'localhost',
+        port: PGPORT ? Number(PGPORT) : 5432,
+        database: PGDATABASE,
+        user: PGUSER,
+        password: PGPASSWORD,
+        ssl: shouldUseSSL(),
+      });
+
+function shouldUseSSL() {
+  if (!PGSSL) return false;
+  return /^(1|true|yes)$/i.test(PGSSL);
 }
 
-export const pool = new Pool({
-  connectionString: buildConnectionString(),
-  max: Number(process.env.PGPOOL_MAX ?? 10),
-});
-
-export async function query<T extends QueryResultRow = QueryResultRow>(
-  text: string,
-  params?: any[]
-): Promise<{ rows: T[] }> {
-  const client = await pool.connect();
-  try {
-    const res = await client.query<T>(text, params as any);
-    return { rows: res.rows as T[] };
-  } finally {
-    client.release();
-  }
+export async function query(text: string, params?: any[]) {
+  return pool.query(text, params);
 }
+
+export const db = { query };
+export default db;
+export { pool };

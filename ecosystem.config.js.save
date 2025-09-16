@@ -1,0 +1,54 @@
+// /opt/attendance-timeoff/ecosystem.config.js
+module.exports = {
+  apps: [
+    {
+      name: 'attendance-api',
+      cwd: '/opt/attendance-timeoff',
+      script: 'server/dist/index.js',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 4000,
+
+        // --- DB ---
+        DATABASE_URL: 'postgres://app:app@127.0.0.1:5433/attendance',
+
+
+        // --- Notifications ---
+        // HR alias (request created notifications)
+        HR_EMAILS: 'hr@republicfinancialservices.com',
+        // Approver list (approval emails)
+        APPROVER_EMAILS: 'sam@republicfinancialservices.com,zaid@republicfinancialservices.com,freddie@republicfinancialservices.com,donald@republicfinancialservices.com',
+        // Keep your original var too (harmless; some code may still read it)
+        MANAGER_NOTIFY_LIST: 'sam@republicfinancialservices.com,zaid@republicfinancialservices.com,freddie@republicfinancialservices.com,donald@republicfinancialservices.com',
+
+        // Optional: if your code references this; safe to unset if unused
+        // DEFAULT_MANAGER_USER_ID: '',
+
+        // --- Zoho OAuth ---
+        ZOHO_CLIENT_ID: '1000.FHO2JF1RU48MOSMHIPXWEPELS7J3XT',
+        ZOHO_CLIENT_SECRET: 'c3c370529bfa666d86c3562172789e3944d13437b5',
+        ZOHO_SCOPES: 'ZohoCRM.modules.ALL ZohoCRM.settings.ALL ZohoCRM.users.READ AaaServer.profile.Read',
+        ZOHO_ACCOUNTS_BASE: 'https://accounts.zoho.com',
+        ZOHO_REDIRECT_URI: 'https://timeoff.timesharehelpcenter.com/api/zoho/callback/',
+
+        // --- Cron auth (used by /api/zoho/cron/refresh) ---
+        CRON_SECRET: '5a722b3c3561400b95046e53f657d5a92862ff3e3f52fb0d'
+      }
+    },
+
+    // Curl-based refresh every 10 minutes
+    {
+      name: 'zoho-refresh-cron',
+      script: 'bash',
+      args: "-lc 'curl -fsS \"http://127.0.0.1:4000/api/zoho/cron/refresh?secret=$CRON_SECRET&windowMins=15\" || true'",
+      cron_restart: '*/10 * * * *',
+      autorestart: false,
+      watch: false,
+      env: {
+        CRON_SECRET: '5a722b3c3561400b95046e53f657d5a92862ff3e3f52fb0d'
+      }
+    }
+  ]
+};
