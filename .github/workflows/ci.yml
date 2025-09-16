@@ -12,6 +12,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # Force dev installs everywhere (beats any .npmrc or env that sets production)
+    env:
+      NPM_CONFIG_PRODUCTION: "false"
+      NODE_ENV: development
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,27 +26,31 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # Cache root + workspace lockfiles (if you have sub-lockfiles)
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
             web/package-lock.json
 
-      # Safety: make sure dev deps aren't omitted by any npmrc/env
-      - name: Ensure dev deps are included
+      # Belt + suspenders: ensure no workspace-level .npmrc flips production=true
+      - name: Neutralize .npmrc (root + workspaces)
         run: |
           echo "production=false" > .npmrc
-          cat .npmrc
+          if [ -f server/.npmrc ]; then sed -i 's/^production=.*$/production=false/' server/.npmrc || true; fi
+          if [ -f web/.npmrc ]; then sed -i 's/^production=.*$/production=false/' web/.npmrc || true; fi
+          echo "omit=" >> .npmrc   # clear omit flags if any
+
+      - name: Show npm config (debug)
+        run: npm config list -l
 
       # Install ALL deps (including dev) across workspaces
       - name: Install dependencies (all workspaces)
         run: npm ci --workspaces --include=dev
 
-      # (Optional) sanity check that key devDeps are present
+      # Verify key dev deps are present
       - name: Verify ESLint deps
         run: |
-          npx --yes npm-which eslint >/dev/null 2>&1 || echo "eslint not found on PATH"
-          npm ls globals eslint @eslint/js typescript-eslint || true
+          node -e "console.log('globals version:', require('globals/package.json').version)"
+          npx eslint -v
 
       # Typecheck
       - name: Typecheck (server)
