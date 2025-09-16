@@ -85,7 +85,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     try {
         // Exchange code → tokens (service expects only the code)
         const tokens = await exchangeCodeForToken(code);
-        // Expected: { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string }
+        // Expected at minimum: { access_token: string; expires_in: number; refresh_token?: string; api_domain?: string; ... }
 
         if (!tokens?.access_token) {
             logZoho('callback:token_exchange_missing_access', tokens as any);
@@ -96,7 +96,7 @@ router.get('/callback', async (req: Request, res: Response) => {
         const apiDomain = (tokens as any)?.api_domain as string | undefined;
         const apiBase = apiDomain && apiDomain.startsWith('http') ? apiDomain : ZOHO_API_BASE;
 
-        // Identify current user
+        // Identify current user (we’ll store their id as userId)
         const me = await fetchCurrentZohoUser(tokens.access_token, apiBase);
         if (!me?.zohoUserId) {
             logZoho('callback:missing_user_id', me as any);
@@ -106,9 +106,9 @@ router.get('/callback', async (req: Request, res: Response) => {
         // Compute expiry
         const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
 
-        // Persist tokens — only fields allowed by your SaveTokensInput type
+        // Persist tokens — align strictly to your SaveTokensInput
         await saveZohoTokens({
-            zohoUserId: String(me.zohoUserId),
+            userId: String(me.zohoUserId),                    // required by your type
             accessToken: tokens.access_token,
             refreshToken: (tokens as any)?.refresh_token ?? null,
             expiresAt,
