@@ -1,118 +1,173 @@
+// server/src/routes/zoho.ts
 import express, { Request, Response } from 'express';
-
-import { requireAuth } from '../auth';
-import { pool } from '../db';
 import {
-  authorizeUrl,          // builds the Zoho /oauth/v2/auth URL
-  exchangeCodeForToken,  // exchanges code -> { access_token, refresh_token, expires_in }
-  fetchZohoUser,         // fetches current Zoho user (optional)
-  saveZohoTokens         // persists tokens into zoho_tokens
+    getZohoAuthorizeUrl,
+    exchangeCodeForTokens,
+    getCurrentZohoUserId,
+    upsertZohoTokens,
+    selectTokensExpiringWithin,
+    refreshAccessToken,
+    updateAccessTokenById,
 } from '../services/zoho';
 
 const router = express.Router();
 
+const {
+    ZOHO_SCOPES = 'ZohoCRM.modules.ALL ZohoCRM.settings.ALL AaaServer.profile.Read',
+    CRON_SECRET,
+    // Where to send the user after a successful link
+    APP_BASE_URL = 'https://timeoff.timesharehelpcenter.com',
+} = process.env;
+
 /**
- * Decode base64url JSON state of shape { r: returnTo, u: userId }
- * Returns {} on failure.
+ * Utility: safe log helper so we always know where errors came from.
  */
-function decodeState(raw?: string): { r?: string; u?: string } {
-  if (!raw) return {};
-  try {
-    // Node 18+ supports "base64url"
-    const json = Buffer.from(raw, 'base64url').toString('utf8');
-    return JSON.parse(json);
-  } catch {
-    return {};
-  }
+function logZoho(label: string, data: unknown) {
+    try {
+        // eslint-disable-next-line no-console
+        console.error(`[ZOHO] ${label}:`, typeof data === 'string' ? data : JSON.stringify(data));
+    } catch {
+        // eslint-disable-next-line no-console
+        console.error(`[ZOHO] ${label} (unstringifiable)`);
+    }
 }
 
 /**
- * GET /api/zoho/status
- * Returns { connected: boolean } for the current authenticated user.
+ * 1) Start OAuth: redirect user to Zoho consent screen
+ * GET /api/zoho/start
  */
-router.get('/status', requireAuth, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id as string | undefined;
-    if (!userId) return res.json({ connected: false });
-
-    const q = `
-      SELECT 1
-        FROM zoho_tokens
-       WHERE user_id = $1
-         AND COALESCE(refresh_token, '') <> ''
-       LIMIT 1
-    `;
-    const r = await pool.query(q, [userId]);
-    const connected = (r.rowCount ?? 0) > 0;
-    return res.json({ connected });
-  } catch (e: any) {
-    return res.status(500).json({ connected: false, error: e?.message || 'status_error' });
-  }
+router.get('/start', (_req: Request, res: Response) => {
+    try {
+        const url = getZohoAuthorizeUrl(ZOHO_SCOPES);
+        return res.redirect(url);
+    } catch (e: any) {
+        logZoho('start:error', { message: e?.message, stack: e?.stack });
+        return res.status(500).json({ ok: false, error: e?.message || 'Failed to create Zoho authorize URL' });
+    }
 });
 
 /**
- * GET /api/zoho/connect?returnTo=/whatever
- * Builds Zoho authorize URL with a base64url-encoded state and 302 redirects there.
- */
-router.get('/connect', requireAuth, (req: Request, res: Response) => {
-  try {
-    const returnTo = (req.query.returnTo as string) || '/';
-    const userId = (req as any).user.id as string;
-
-    const stateObj = { r: returnTo, u: userId };
-    const state = Buffer.from(JSON.stringify(stateObj)).toString('base64url');
-
-    const url = authorizeUrl(state);
-    return res.redirect(302, url);
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e?.message || 'connect_error' });
-  }
-});
-
-/**
- * GET /api/zoho/callback?code=...&state=...
- * NOTE: no requireAuth here — user identity comes from signed/opaque `state` (and we also accept an authenticated user if present).
+ * 2) OAuth callback: exchange code -> tokens, get current user id, upsert tokens.
+ *    On success, redirect to app root (no query params) to avoid loops.
+ * GET /api/zoho/callback
  */
 router.get('/callback', async (req: Request, res: Response) => {
-  try {
-    const code = req.query.code as string | undefined;
-    const stateRaw = req.query.state as string | undefined;
-    if (!code) return res.status(400).send('Missing code');
+    const { code, error, error_description } = req.query as Record<string, string | undefined>;
 
-    const state = decodeState(stateRaw);
-    // Prefer req.user if middleware already set it; otherwise fall back to state.u
-    const userId = (req as any).user?.id || state.u;
-    const returnTo = state.r || '/';
-    if (!userId) return res.status(401).send('Unauthenticated');
-
-    // Exchange authorization code for tokens
-    const token = await exchangeCodeForToken(code);
-
-    // Try to fetch Zoho user info (optional, but nice for audits)
-    let zohoUserId: string | null = null;
-    try {
-      const me = await fetchZohoUser(token.access_token);
-      // Align with whatever shape your fetchZohoUser returns
-      zohoUserId = (me?.users?.[0]?.id ?? me?.id ?? null) as string | null;
-    } catch {
-      // Non-fatal
+    // If Zoho sent back an error
+    if (error) {
+        logZoho('callback:provider_error', { error, error_description });
+        return res.status(400).send('Callback error');
+    }
+    if (!code) {
+        logZoho('callback:missing_code', req.query);
+        return res.status(400).send('Callback error');
     }
 
-    // Persist tokens (you can also upsert per user)
-    await saveZohoTokens({
-      userId: String(userId),
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token,
-      expiresAt: new Date(Date.now() + Math.max(0, (token.expires_in ?? 3600) - 60) * 1000),
-      zohoUserId
-    });
+    try {
+        // 1) Exchange code for tokens
+        const tokens = await exchangeCodeForTokens(code); // { access_token, refresh_token, expires_in, scope, api_domain, token_type }
+        if (!tokens?.access_token) {
+            logZoho('callback:token_exchange_missing_access', tokens);
+            return res.status(400).send('Callback error');
+        }
 
-    // Head back to the app
-    return res.redirect(returnTo);
-  } catch (err: any) {
-    console.error('Zoho callback error:', err?.message || err);
-    return res.status(500).send('Callback error');
-  }
+        // 2) Get current Zoho user identity using the fresh access token
+        const me = await getCurrentZohoUserId(tokens.access_token);
+        // Expecting something like { zohoUserId, email, fullName } from your service
+        if (!me?.zohoUserId) {
+            logZoho('callback:missing_user_id', me);
+            return res.status(400).send('Callback error');
+        }
+
+        // 3) Upsert tokens keyed by zohoUserId (handles duplicate key gracefully)
+        const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
+        await upsertZohoTokens({
+            zohoUserId: String(me.zohoUserId),
+            email: me.email ?? null,
+            fullName: me.fullName ?? null,
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token ?? null,
+            scope: tokens.scope ?? ZOHO_SCOPES,
+            tokenType: tokens.token_type ?? 'Bearer',
+            apiDomain: tokens.api_domain ?? null,
+            expiresAt,
+            raw: tokens as unknown as Record<string, unknown>, // keep raw for debugging if your table supports jsonb
+        });
+
+        // 4) Optional cookie to indicate connection (httponly=true)
+        res.cookie('zoho_connected', '1', {
+            httpOnly: true,
+            sameSite: 'lax',
+            secure: true,
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+            path: '/',
+        });
+
+        // 5) Redirect to app root — NO query params to avoid redirect loops
+        return res.redirect(APP_BASE_URL);
+    } catch (e: any) {
+        // Common causes:
+        // - invalid_client / bad client id/secret or wrong Zoho region endpoints
+        // - invalid_code (single use code already used / expired)
+        // - redirect URI mismatch (must match EXACTLY in Zoho settings)
+        // - DB upsert schema mismatch / unique constraint errors
+        logZoho('callback:exception', { message: e?.message, stack: e?.stack });
+        return res.status(400).send('Callback error');
+    }
+});
+
+/**
+ * 3) Cron refresh tokens within a window (minutes)
+ *    GET /api/zoho/cron/refresh?secret=...&windowMins=60
+ */
+router.get('/cron/refresh', async (req: Request, res: Response) => {
+    try {
+        const { secret, windowMins = '60' } = req.query as Record<string, string | undefined>;
+        if (!CRON_SECRET || secret !== CRON_SECRET) {
+            return res.status(401).json({ ok: false, error: 'Unauthorized' });
+        }
+
+        const window = Math.max(15, Number(windowMins) || 60); // min 15 mins safety
+        const expiring = await selectTokensExpiringWithin(window);
+        let refreshed = 0;
+        const items: Array<{ id: string; ok: boolean; error?: string }> = [];
+
+        for (const t of expiring) {
+            try {
+                const newAccess = await refreshAccessToken(t.refresh_token);
+                if (newAccess?.access_token) {
+                    const newExpiresAt = new Date(Date.now() + (Number(newAccess.expires_in ?? 3600) * 1000));
+                    await updateAccessTokenById(t.id, {
+                        accessToken: newAccess.access_token,
+                        expiresAt: newExpiresAt,
+                        apiDomain: newAccess.api_domain ?? t.api_domain,
+                        tokenType: newAccess.token_type ?? t.token_type,
+                        scope: newAccess.scope ?? t.scope,
+                    });
+                    refreshed++;
+                    items.push({ id: t.id, ok: true });
+                } else {
+                    items.push({ id: t.id, ok: false, error: 'No access_token in refresh response' });
+                }
+            } catch (e: any) {
+                items.push({ id: t.id, ok: false, error: e?.message || 'refresh error' });
+                logZoho('cron:refresh_item_error', { id: t.id, message: e?.message, stack: e?.stack });
+            }
+        }
+
+        return res.json({
+            ok: true,
+            windowMins: window,
+            checked: expiring.length,
+            refreshed,
+            errors: items.filter(i => !i.ok).length,
+            items,
+        });
+    } catch (e: any) {
+        logZoho('cron:refresh_exception', { message: e?.message, stack: e?.stack });
+        return res.status(500).json({ ok: false, error: e?.message || 'cron refresh failed' });
+    }
 });
 
 export default router;
