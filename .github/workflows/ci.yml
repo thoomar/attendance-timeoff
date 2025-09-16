@@ -20,33 +20,45 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # Cache all workspaces by listing their lockfiles
+          # Cache root + workspace lockfiles (if you have sub-lockfiles)
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
             web/package-lock.json
 
-      # Install ALL workspace deps (including dev) once
+      # Safety: make sure dev deps aren't omitted by any npmrc/env
+      - name: Ensure dev deps are included
+        run: |
+          echo "production=false" > .npmrc
+          cat .npmrc
+
+      # Install ALL deps (including dev) across workspaces
       - name: Install dependencies (all workspaces)
         run: npm ci --workspaces --include=dev
 
-      # Optional: fast sanity checks
+      # (Optional) sanity check that key devDeps are present
+      - name: Verify ESLint deps
+        run: |
+          npx --yes npm-which eslint >/dev/null 2>&1 || echo "eslint not found on PATH"
+          npm ls globals eslint @eslint/js typescript-eslint || true
+
+      # Typecheck
       - name: Typecheck (server)
         run: npm run -w server typecheck --if-present
       - name: Typecheck (web)
         run: npm run -w web typecheck --if-present
+
+      # Lint from repo root (uses root eslint.config.mjs)
       - name: Lint (root)
         run: npm run lint --if-present
 
-      # Build server
+      # Build
       - name: Build server
         run: npm run -w server build
-
-      # Build web
       - name: Build web
         run: npm run -w web build
 
-      # (Optional) Upload artifacts so you can download built bundles from the CI run
+      # Artifacts
       - name: Upload server build
         if: success()
         uses: actions/upload-artifact@v4
