@@ -13,12 +13,30 @@ type CalendarEntry = { userId: string; userName: string; dates: string[]; status
 
 // We’ll normalize “pending” into this UI-friendly item
 type PendingUIItem = {
-    id: string;                 // single request id (per date)
+    id: string; // single request id (per date)
     employeeName?: string;
     employeeEmail?: string;
-    date: string;               // one date
+    date: string; // one date
     reason: string;
 };
+
+/** ----------------- Helpers for the Zoho loop fix ----------------- */
+function parseZohoCallbackFlag(): boolean {
+    const params = new URLSearchParams(window.location.search);
+    const a = params.get('zoho');
+    const b = params.get('connected');
+    // Accept both ?zoho=connected and ?connected=zoho
+    return (a && a.toLowerCase() === 'connected') || (b && b.toLowerCase() === 'zoho');
+}
+
+function stripQueryParams() {
+    const url = new URL(window.location.href);
+    if (url.search) {
+        url.search = '';
+        window.history.replaceState({}, '', url.toString());
+    }
+}
+/** ----------------------------------------------------------------- */
 
 export default function TimeOffPage() {
     const [user, setUser] = useState<User | null>(null);
@@ -30,22 +48,48 @@ export default function TimeOffPage() {
 
     // Zoho connection gate
     const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
-    useEffect(() => {
-        fetch('/api/zoho/status')
-            .then(r => r.json())
-            .then(d => {
-                setZohoConnected(!!d.connected);
-                // If arriving with ?connected=zoho and not connected yet, kick off OAuth
-                const params = new URLSearchParams(location.search);
-                if (!d.connected && params.get('connected') === 'zoho') {
-                    location.href = '/api/zoho/connect?returnTo=' + encodeURIComponent(location.pathname);
-                }
-            })
-            .catch(() => setZohoConnected(false));
-    }, []);
+
+    // Sentinel: did we just return from Zoho?
+    const justReturnedFromZoho = useMemo(parseZohoCallbackFlag, []);
 
     useEffect(() => {
-        fetch('/api/me').then(r => r.json()).then(setUser);
+        let cancelled = false;
+
+        (async () => {
+            try {
+                const r = await fetch('/api/zoho/status', { credentials: 'include' });
+                const d = await r.json();
+                if (cancelled) return;
+
+                setZohoConnected(!!d.connected);
+
+                // If we *are* connected and the URL has a callback flag, clean the URL once.
+                if (d?.connected && justReturnedFromZoho) {
+                    stripQueryParams();
+                    return; // Nothing else to do.
+                }
+
+                // If NOT connected and we did NOT just return from Zoho, start the OAuth flow exactly once.
+                if (!d?.connected && !justReturnedFromZoho) {
+                    const returnTo = '/'; // Landing page after consent
+                    window.location.assign(`/api/zoho/start?returnTo=${encodeURIComponent(returnTo)}`);
+                }
+
+                // If NOT connected and we *did* just return with a flag, let the next render happen:
+                // the server might still be finalizing; the URL will be cleaned on the next pass if connected.
+
+            } catch (_e) {
+                if (!cancelled) setZohoConnected(false);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [justReturnedFromZoho]);
+
+    useEffect(() => {
+        fetch('/api/me').then(r => r.json()).then(setUser).catch(() => setUser(null));
     }, []);
 
     useEffect(() => {
@@ -72,15 +116,14 @@ export default function TimeOffPage() {
                     if (Array.isArray(raw)) {
                         for (const item of raw) {
                             if (Array.isArray(item?.ids) && (item.start || item.end)) {
-                                // expand group into one row per id; dates not provided individually, so derive from range
-                                // we can’t derive each exact date without querying; instead we’ll show a single action per id with the group’s reason
-                                // If you want exact per-id dates, adjust the API to also return date[] alongside ids[]
                                 for (const id of item.ids) {
                                     out.push({
                                         id,
                                         employeeName: item.full_name ?? undefined,
                                         employeeEmail: item.email ?? undefined,
-                                        date: (item.start ?? '').slice(0, 10) + (item.end && item.end !== item.start ? ` – ${String(item.end).slice(0, 10)}` : ''),
+                                        date:
+                                            (item.start ?? '').slice(0, 10) +
+                                            (item.end && item.end !== item.start ? ` – ${String(item.end).slice(0, 10)}` : ''),
                                         reason: item.reason ?? '',
                                     });
                                 }
@@ -116,10 +159,19 @@ export default function TimeOffPage() {
             });
 
             if (!res.ok) {
-                // Try JSON error first, then text (may be HTML "Cannot POST ..." page)
                 const ct = res.headers.get('content-type') || '';
-                const msg = ct.includes('application/json') ? (await res.json()).error || JSON.stringify(await res.json())
-                    : await res.text();
+                // Try JSON error first, then text
+                let msg: string = 'Failed to submit';
+                if (ct.includes('application/json')) {
+                    try {
+                        const j = await res.json();
+                        msg = j?.error || JSON.stringify(j);
+                    } catch {
+                        msg = 'Failed to submit';
+                    }
+                } else {
+                    msg = await res.text();
+                }
                 throw new Error(typeof msg === 'string' ? msg : 'Failed to submit');
             }
 
@@ -145,11 +197,6 @@ export default function TimeOffPage() {
                 throw new Error(txt);
             }
             setPending(p => p.filter(i => i.id !== id));
-            // Optionally refresh calendar to reflect approvals
-            // (not strictly necessary; uncomment if you want instant reflect)
-            // const now = new Date(); const to = new Date(); to.setMonth(to.getMonth()+2);
-            // const qs = `from=${now.toISOString().slice(0,10)}&to=${to.toISOString().slice(0,10)}`;
-            // fetch(`/api/time-off/calendar?${qs}`).then(r=>r.json()).then(d=>setCalendar(d.entries || []));
         } catch (e: any) {
             alert(e?.message || 'Failed to update');
         }
@@ -158,6 +205,7 @@ export default function TimeOffPage() {
     // Loading states
     if (!user) return <div className="p-6 text-sm text-slate-400">Loading…</div>;
     if (zohoConnected === null) return <div className="p-6 text-sm text-slate-400">Checking Zoho…</div>;
+
     if (!zohoConnected) {
         return (
             <div className="min-h-dvh flex items-center justify-center p-6">
@@ -165,7 +213,7 @@ export default function TimeOffPage() {
                     <h2 className="text-lg font-semibold">Connect Zoho</h2>
                     <p className="text-slate-400 text-sm">Please connect your Zoho account to continue.</p>
                     <a
-                        href={`/api/zoho/connect?returnTo=${encodeURIComponent(location.pathname)}`}
+                        href={`/api/zoho/start?returnTo=${encodeURIComponent('/')}`}
                         className="btn-primary inline-flex"
                     >
                         Connect Zoho
