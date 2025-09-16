@@ -1,11 +1,9 @@
-// server/src/routes/zoho.ts
 import express, { Request, Response } from 'express';
 import { exchangeCodeForToken, saveZohoTokens } from '../services/zoho';
 
 const router = express.Router();
 
 const {
-    // Adjust for your region if needed
     ZOHO_ACCOUNTS_BASE = 'https://accounts.zoho.com',
     ZOHO_API_BASE = 'https://www.zohoapis.com',
     ZOHO_CLIENT_ID = '',
@@ -19,14 +17,17 @@ const {
 function logZoho(label: string, data: unknown) {
     try {
         // eslint-disable-next-line no-console
-        console.error(`[ZOHO] ${label}:`, typeof data === 'string' ? data : JSON.stringify(data));
+        console.error(
+            `[ZOHO] ${label}:`,
+            typeof data === 'string' ? data : JSON.stringify(data)
+        );
     } catch {
         // eslint-disable-next-line no-console
         console.error(`[ZOHO] ${label} (unstringifiable)`);
     }
 }
 
-/** Build Zoho OAuth authorize URL (no dependency on services) */
+/** Build Zoho OAuth authorize URL */
 function buildAuthorizeUrl(): string {
     const qp = new URLSearchParams({
         response_type: 'code',
@@ -84,35 +85,35 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     try {
-        // Exchange code → tokens (your service expects only the code)
+        // Exchange code → tokens (service expects only the code)
         const tokens = await exchangeCodeForToken(code);
-        // Expected: { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string; }
+        // Expected minimal shape:
+        // { access_token: string; expires_in: number; refresh_token?: string; token_type?: string; scope?: string; api_domain?: string }
 
         if (!tokens?.access_token) {
             logZoho('callback:token_exchange_missing_access', tokens as any);
             return res.status(400).send('Callback error');
         }
 
-        // Identify current user with the fresh access token
-        // Prefer api_domain if present; fall back to ZOHO_API_BASE
+        // Prefer api_domain if present; otherwise use ZOHO_API_BASE
         const apiDomain = (tokens as any)?.api_domain as string | undefined;
         const apiBase = apiDomain && apiDomain.startsWith('http') ? apiDomain : ZOHO_API_BASE;
-        const me = await fetchCurrentZohoUser(tokens.access_token, apiBase);
 
+        // Identify current user
+        const me = await fetchCurrentZohoUser(tokens.access_token, apiBase);
         if (!me?.zohoUserId) {
             logZoho('callback:missing_user_id', me as any);
             return res.status(400).send('Callback error');
         }
 
-        // Compute token expiry
+        // Compute expiry
         const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
 
-        // Persist the minimal, known-safe input for your SaveTokensInput type
+        // Persist tokens — only fields allowed by SaveTokensInput
         await saveZohoTokens({
             zohoUserId: String(me.zohoUserId),
             accessToken: tokens.access_token,
             refreshToken: (tokens as any)?.refresh_token ?? null,
-            scope: tokens.scope ?? ZOHO_SCOPES,
             tokenType: tokens.token_type ?? 'Bearer',
             expiresAt,
         });
@@ -129,7 +130,7 @@ router.get('/callback', async (req: Request, res: Response) => {
         // Clean redirect (no params) to avoid loops
         return res.redirect(APP_BASE_URL);
     } catch (e: any) {
-        // Common causes: invalid_code, redirect URI mismatch, wrong region, bad client creds, DB schema
+        // e.g., invalid_code, redirect URI mismatch, wrong region, bad client creds, DB schema
         logZoho('callback:exception', { message: e?.message, stack: e?.stack });
         return res.status(400).send('Callback error');
     }
