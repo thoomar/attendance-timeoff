@@ -12,5 +12,11 @@
     "start": "npm -w server start",
     "format": "npm -w server run format && npm -w web run format",
     "lint": "npm -w server run lint && npm -w web run lint"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.12.0",
+    "eslint": "^9.12.0",
+    "globals": "^15.9.0",
+    "typescript-eslint": "^8.10.0"
   }
 }
