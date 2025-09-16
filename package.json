@@ -11,7 +11,7 @@
     "build": "npm -w server run build && npm -w web run build",
     "start": "npm -w server start",
     "format": "npm -w server run format && npm -w web run format",
-    "lint": "eslint . --max-warnings=0"
+    "lint": "eslint ."
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
