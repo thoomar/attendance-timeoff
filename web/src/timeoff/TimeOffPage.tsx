@@ -13,23 +13,22 @@ type CalendarEntry = { userId: string; userName: string; dates: string[]; status
 
 // We’ll normalize “pending” into this UI-friendly item
 type PendingUIItem = {
-    id: string; // single request id (per date)
+    id: string;                 // single request id (per date)
     employeeName?: string;
     employeeEmail?: string;
-    date: string; // one date
+    date: string;               // one date
     reason: string;
 };
 
 /** ----------------- Helpers for the Zoho loop fix ----------------- */
 function parseZohoCallbackFlag(): boolean {
     const params = new URLSearchParams(window.location.search);
-    const a = params.get('zoho');
-    const b = params.get('connected');
-    // Accept both ?zoho=connected and ?connected=zoho
-    return (a && a.toLowerCase() === 'connected') || (b && b.toLowerCase() === 'zoho');
+    const a = params.get('zoho') === 'connected';     // supports ?zoho=connected
+    const b = params.get('connected') === 'zoho';     // supports ?connected=zoho
+    return a || b;
 }
 
-function stripQueryParams() {
+function stripQueryParams(): void {
     const url = new URL(window.location.href);
     if (url.search) {
         url.search = '';
@@ -50,7 +49,7 @@ export default function TimeOffPage() {
     const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
 
     // Sentinel: did we just return from Zoho?
-    const justReturnedFromZoho = useMemo(parseZohoCallbackFlag, []);
+    const justReturnedFromZoho = useMemo<boolean>(parseZohoCallbackFlag, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -61,22 +60,22 @@ export default function TimeOffPage() {
                 const d = await r.json();
                 if (cancelled) return;
 
-                setZohoConnected(!!d.connected);
+                // ensure boolean (not string | null)
+                const isConnected = Boolean(d?.connected);
+                setZohoConnected(isConnected);
 
-                // If we *are* connected and the URL has a callback flag, clean the URL once.
-                if (d?.connected && justReturnedFromZoho) {
+                // If connected and came back with a query flag, clean the URL once
+                if (isConnected && justReturnedFromZoho) {
                     stripQueryParams();
-                    return; // Nothing else to do.
+                    return;
                 }
 
-                // If NOT connected and we did NOT just return from Zoho, start the OAuth flow exactly once.
-                if (!d?.connected && !justReturnedFromZoho) {
+                // If NOT connected and we did NOT just return from Zoho, start OAuth exactly once
+                if (!isConnected && !justReturnedFromZoho) {
                     const returnTo = '/'; // Landing page after consent
                     window.location.assign(`/api/zoho/start?returnTo=${encodeURIComponent(returnTo)}`);
                 }
-
-                // If NOT connected and we *did* just return with a flag, let the next render happen:
-                // the server might still be finalizing; the URL will be cleaned on the next pass if connected.
+                // If not connected but we *did* just return, wait for next pass (server may be finalizing)
 
             } catch (_e) {
                 if (!cancelled) setZohoConnected(false);
@@ -160,7 +159,6 @@ export default function TimeOffPage() {
 
             if (!res.ok) {
                 const ct = res.headers.get('content-type') || '';
-                // Try JSON error first, then text
                 let msg: string = 'Failed to submit';
                 if (ct.includes('application/json')) {
                     try {
