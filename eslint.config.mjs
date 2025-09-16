@@ -3,11 +3,17 @@ import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
+/**
+ * Root flat-config for the monorepo
+ * - Lints TS/TSX across server/ and web/
+ * - Uses TS-aware no-unused-vars and allows underscore-prefixed args/vars
+ * - Enables type-aware rules per workspace tsconfig
+ */
 export default [
-    // Ignore build artifacts
+    // Ignore build outputs & deps
     { ignores: ["**/dist/**", "**/node_modules/**", "web/dist/**"] },
 
-    // Base TS/TSX linting
+    // Base config for all TS/TSX (syntax-level; no type-checking here)
     {
         files: ["**/*.{ts,tsx}"],
         languageOptions: {
@@ -23,16 +29,28 @@ export default [
         rules: {
             ...js.configs.recommended.rules,
             ...tseslint.configs.recommended.rules,
+
+            // Prefer TS rule and allow underscore-prefixed unused vars/args/catches
+            "no-unused-vars": "off",
+            "@typescript-eslint/no-unused-vars": [
+                "warn",
+                {
+                    argsIgnorePattern: "^_",
+                    varsIgnorePattern: "^_",
+                    caughtErrorsIgnorePattern: "^_",
+                },
+            ],
         },
     },
 
-    // Server: enable type-checked rules
+    // SERVER: enable type-aware rules using server/tsconfig.json
     {
         files: ["server/**/*.ts"],
         languageOptions: {
             parser: tseslint.parser,
             parserOptions: {
                 project: ["./server/tsconfig.json"],
+                // Anchor paths at repo root (where this file lives)
                 tsconfigRootDir: new URL(".", import.meta.url),
             },
         },
@@ -41,7 +59,7 @@ export default [
         },
     },
 
-    // Web: enable type-checked rules
+    // WEB: enable type-aware rules using web/tsconfig.json
     {
         files: ["web/src/**/*.{ts,tsx}"],
         languageOptions: {
