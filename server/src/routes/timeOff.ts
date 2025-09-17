@@ -1,9 +1,11 @@
 // server/src/routes/timeOff.ts
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
-import * as db from '../db'; // your project uses module-namespace import
+import * as db from '../db';
 import { requireAuth } from '../auth';
 import { sendEmail } from '../services/email';
+
+console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
 
 const router = express.Router();
 
@@ -42,14 +44,13 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
         const body = CreateReq.parse(req.body);
         const dates = body.dates.map(asDate);
 
-        const { rows } = await db.query(
-            `
-                INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
-                VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
-                    RETURNING id
-            `,
-            [user.id, dates, body.reason],
-        );
+        const insertSql = `
+      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
+      VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
+      RETURNING id
+    `;
+
+        const { rows } = await db.query(insertSql, [user.id, dates, body.reason]);
         const id = rows[0]?.id as string;
 
         // notify HR alias + approvers
@@ -60,11 +61,7 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
             `Reason: ${body.reason}`;
         const to = ['hr@republicfinancialservices.com', ...approverEmails];
 
-        await sendEmail({
-            to,
-            subject,
-            text,
-        }).catch(() => null);
+        await sendEmail({ to, subject, text }).catch(() => null);
 
         return res.json({ ok: true, id });
     } catch (e: any) {
@@ -75,17 +72,15 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
 // Pending list for approvers
 router.get('/time-off/pending', requireAuth, async (_req: Request, res: Response) => {
     try {
-        const { rows } = await db.query(
-            `
-                SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-                       u.full_name AS user_name, u.email AS user_email
-                FROM time_off_requests r
-                         LEFT JOIN users u ON u.id = r.user_id
-                WHERE r.status = 'PENDING'
-                ORDER BY r.created_at DESC
-            `,
-            [],
-        );
+        const pendingSql = `
+      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+             u.full_name AS user_name, u.email AS user_email
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE r.status = 'PENDING'
+      ORDER BY r.created_at DESC
+    `;
+        const { rows } = await db.query(pendingSql, []);
         return res.json(rows);
     } catch (e: any) {
         return res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
@@ -98,18 +93,16 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
 
-        const { rows } = await db.query(
-            `
-                UPDATE time_off_requests
-                SET status = $2,
-                    decision_note = $3,
-                    decided_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = $1
-                    RETURNING id
-            `,
-            [id, body.decision, body.note ?? null],
-        );
+        const updateSql = `
+      UPDATE time_off_requests
+      SET status = $2,
+          decision_note = $3,
+          decided_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+    `;
+        const { rows } = await db.query(updateSql, [id, body.decision, body.note ?? null]);
 
         if (rows.length === 0) {
             return res.status(404).json({ ok: false, error: 'not found' });
@@ -120,33 +113,35 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
     }
 });
 
-// Calendar (range) — works with DATE[] and no employee_user_id usage
+// Calendar (range) — DATE[] query with explicit SQL logging
 router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
         const to = (req.query.to as string) || new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
 
-        const { rows } = await db.query(
-            `
-                SELECT
-                    r.id,
-                    r.user_id,
-                    u.full_name AS user_name,
-                    u.email     AS user_email,
-                    r.dates,
-                    r.status,
-                    r.reason
-                FROM time_off_requests r
-                         LEFT JOIN users u ON u.id = r.user_id
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM unnest(r.dates) AS d(actual)
-                    WHERE d.actual BETWEEN $1::date AND $2::date
-                )
-                ORDER BY r.user_id, r.id DESC
-            `,
-            [from, to],
-        );
+        const sql = `
+      SELECT
+        r.id,
+        r.user_id,
+        u.full_name AS user_name,
+        u.email     AS user_email,
+        r.dates,
+        r.status,
+        r.reason
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE EXISTS (
+        SELECT 1
+        FROM unnest(r.dates) AS d(actual)
+        WHERE d.actual BETWEEN $1::date AND $2::date
+      )
+      ORDER BY r.user_id, r.id DESC
+    `;
+
+        console.log('TIMEOFF SQL about to run', { from, to });
+        console.log('TIMEOFF SQL:\n' + sql);
+
+        const { rows } = await db.query(sql, [from, to]);
 
         const entries = rows.map((r: any) => ({
             id: r.id,
@@ -159,7 +154,7 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
 
         return res.json({ entries });
     } catch (e: any) {
-        console.error('calendar failed', e);
+        console.error('TIMEOFF ROUTE calendar failed', e);
         return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
 });
