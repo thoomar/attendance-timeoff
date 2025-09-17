@@ -85,8 +85,6 @@ router.get('/callback', async (req: Request, res: Response) => {
     try {
         // Exchange code → tokens (service expects only the code)
         const tokens = await exchangeCodeForToken(code);
-        // Expected at minimum: { access_token: string; expires_in: number; refresh_token?: string; api_domain?: string; ... }
-
         if (!tokens?.access_token) {
             logZoho('callback:token_exchange_missing_access', tokens as any);
             return res.status(400).send('Callback error');
@@ -96,7 +94,7 @@ router.get('/callback', async (req: Request, res: Response) => {
         const apiDomain = (tokens as any)?.api_domain as string | undefined;
         const apiBase = apiDomain && apiDomain.startsWith('http') ? apiDomain : ZOHO_API_BASE;
 
-        // Identify current user (we’ll store their id as userId)
+        // Identify current user
         const me = await fetchCurrentZohoUser(tokens.access_token, apiBase);
         if (!me?.zohoUserId) {
             logZoho('callback:missing_user_id', me as any);
@@ -106,9 +104,9 @@ router.get('/callback', async (req: Request, res: Response) => {
         // Compute expiry
         const expiresAt = new Date(Date.now() + (Number(tokens.expires_in ?? 3600) * 1000));
 
-        // Persist tokens — align strictly to your SaveTokensInput
+        // ✅ Persist tokens — use `userId` (required by SaveTokensInput)
         await saveZohoTokens({
-            userId: String(me.zohoUserId),                    // required by your type
+            userId: String(me.zohoUserId),
             accessToken: tokens.access_token,
             refreshToken: (tokens as any)?.refresh_token ?? null,
             expiresAt,
@@ -123,10 +121,8 @@ router.get('/callback', async (req: Request, res: Response) => {
             path: '/',
         });
 
-        // Clean redirect (no params) to avoid loops
         return res.redirect(APP_BASE_URL);
     } catch (e: any) {
-        // e.g., invalid_code, redirect URI mismatch, wrong region, bad client creds, DB schema
         logZoho('callback:exception', { message: e?.message, stack: e?.stack });
         return res.status(400).send('Callback error');
     }
