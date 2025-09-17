@@ -25,13 +25,13 @@ type ReqUser = {
 
 function getReqUser(req: Request): ReqUser | null {
     const u = (req as any).user as ReqUser | undefined;
-    if (u && u.id) return u;
+    if (u?.id) return u;
 
     const raw = req.header('x-dev-user');
     if (!raw) return null;
     try {
         const parsed = JSON.parse(raw);
-        if (parsed && parsed.id) return parsed;
+        if (parsed?.id) return parsed;
     } catch {
         /* ignore */
     }
@@ -74,10 +74,10 @@ async function createRequestHandler(req: Request, res: Response) {
 
     try {
         const q = `
-      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-      VALUES ($1, $2::date[], $3, 'PENDING', now())
-      RETURNING id
-    `;
+            INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
+            VALUES ($1, $2::date[], $3, 'PENDING', now())
+                RETURNING id
+        `;
         const { rows } = await db.query(q, [me.id, normalized, String(reason ?? '').trim()]);
         return res.json({ ok: true, id: rows[0]?.id });
     } catch (e: any) {
@@ -85,7 +85,7 @@ async function createRequestHandler(req: Request, res: Response) {
     }
 }
 
-// Back-compat for old UI
+// Legacy alias (old UI posts here)
 router.post('/requests', createRequestHandler);
 // Canonical path
 router.post('/', createRequestHandler);
@@ -95,21 +95,21 @@ router.post('/', createRequestHandler);
 router.get('/pending', async (_req, res) => {
     try {
         const q = `
-      SELECT
-        r.id,
-        r.user_id,
-        r.dates,
-        r.reason,
-        r.status,
-        r.created_at,
-        COALESCE(u.full_name, u.name, u.email) AS user_name,
-        u.email AS user_email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.status = 'PENDING'
-      ORDER BY r.created_at DESC
-      LIMIT 200
-    `;
+            SELECT
+                r.id,
+                r.user_id,
+                r.dates,
+                r.reason,
+                r.status,
+                r.created_at,
+                COALESCE(u.full_name, u.name, u.email) AS user_name,
+                u.email AS user_email
+            FROM time_off_requests r
+                     LEFT JOIN users u ON u.id = r.user_id
+            WHERE r.status = 'PENDING'
+            ORDER BY r.created_at DESC
+                LIMIT 200
+        `;
         const { rows } = await db.query(q, []);
         return res.json(rows);
     } catch (e: any) {
@@ -134,16 +134,15 @@ router.patch('/:id', async (req, res) => {
 
     try {
         const q = `
-      UPDATE time_off_requests
-         SET status = $2,
-             decision_note = COALESCE($3, decision_note),
-             decided_at = now()
-       WHERE id = $1
-       RETURNING id
-    `;
+            UPDATE time_off_requests
+            SET status = $2,
+                decision_note = COALESCE($3, decision_note),
+                decided_at = now()
+            WHERE id = $1
+                RETURNING id
+        `;
         const { rows } = await db.query(q, [id, next, note ?? null]);
 
-        // Use rows.length (not rowCount) to satisfy TS in CI
         if (rows.length === 0) return bad(res, 404, 'not found');
 
         return res.json({ ok: true });
@@ -163,24 +162,24 @@ router.get('/calendar', async (req, res) => {
 
     try {
         const q = `
-      SELECT
-        r.id,
-        r.user_id,
-        COALESCE(u.full_name, u.name, u.email) AS name,
-        r.status,
-        r.reason,
-        r.dates
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.status IN ('PENDING','APPROVED') -- show both; UI marks pending
-        AND EXISTS (
-          SELECT 1
-          FROM unnest(r.dates) AS d
-          WHERE d BETWEEN $1::date AND $2::date
-        )
-      ORDER BY COALESCE(u.full_name, u.name, u.email), r.created_at DESC
-      LIMIT 1000
-    `;
+            SELECT
+                r.id,
+                r.user_id,
+                COALESCE(u.full_name, u.name, u.email) AS name,
+                r.status,
+                r.reason,
+                r.dates
+            FROM time_off_requests r
+                     LEFT JOIN users u ON u.id = r.user_id
+            WHERE r.status IN ('PENDING','APPROVED')
+              AND EXISTS (
+                SELECT 1
+                FROM unnest(r.dates) AS d
+                WHERE d BETWEEN $1::date AND $2::date
+            )
+            ORDER BY COALESCE(u.full_name, u.name, u.email), r.created_at DESC
+                LIMIT 1000
+        `;
         const { rows } = await db.query(q, [from, to]);
 
         const entries = rows.map(r => ({
@@ -189,7 +188,6 @@ router.get('/calendar', async (req, res) => {
             name: r.name,
             status: r.status,
             reason: r.reason,
-            // return as UTC midnight ISO strings to match existing client behavior
             dates: (r.dates || []).map((d: string) => new Date(`${d}T00:00:00Z`).toISOString()),
         }));
 
