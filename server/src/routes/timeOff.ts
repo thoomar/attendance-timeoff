@@ -1,151 +1,218 @@
-// /opt/attendance-timeoff/server/src/routes/timeOff.ts
-import express, { Request, Response } from 'express';
-import { z } from 'zod';
+// server/src/routes/timeOff.ts
+
+import { Router, Request, Response } from 'express';
 import * as db from '../db';
-import { requireAuth } from '../auth';
-import { sendEmail } from '../services/email';
 
-const router = express.Router();
+type AppUser = {
+    id: string;
+    email?: string;
+    fullName?: string;
+    role?: string;
+    managerUserId?: string | null;
+};
+type ReqWithUser = Request & { user?: AppUser };
 
-console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
+const router = Router();
 
-/** Env */
-const RAW_APPROVER_EMAILS =
-    (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-const approverEmails = Array.from(new Set(RAW_APPROVER_EMAILS));
+// Build tag so we can verify the compiled file loaded
+// (you'll see this line in PM2 logs after restart)
+console.log(
+    'TIMEOFF ROUTE BUILD TAG',
+    new Date().toISOString(),
+    __filename.replace(process.cwd(), '')
+);
 
-/** Schemas */
-const CreateReq = z.object({
-    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
-    reason: z.string().min(3),
-});
-const DecisionReq = z.object({
-    decision: z.enum(['APPROVED', 'DENIED']),
-    note: z.string().optional(),
-});
-const asDate = (s: string) => new Date(`${s}T00:00:00.000Z`);
+// ---------- helpers ----------
 
-/** Health */
-router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
+function getUser(req: ReqWithUser): AppUser {
+    // Prefer whatever upstream middleware populated
+    if (req.user?.id) return req.user;
 
-/** Create (POST /api/time-off) */
-router.post('/', requireAuth, async (req, res) => {
-    try {
-        const user = (req as any).user;
-        const body = CreateReq.parse(req.body);
-        const dates = body.dates.map(asDate);
-
-        const { rows } = await db.query(
-            `
-      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
-      VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
-      RETURNING id
-      `,
-            [user.id, dates, body.reason],
-        );
-        const id = rows[0]?.id as string;
-
-        const subject = `${user.fullName || user.email} submitted a time off request`;
-        const summaryDates = body.dates.join(', ');
-        const text =
-            `${user.fullName || user.email} has submitted a time off request for ${summaryDates}\n` +
-            `Reason: ${body.reason}`;
-        const to = ['hr@republicfinancialservices.com', ...approverEmails];
-        await sendEmail({ to, subject, text }).catch(() => null);
-
-        res.json({ ok: true, id });
-    } catch (e: any) {
-        res.status(400).json({ ok: false, error: e?.message || 'create failed' });
+    // Dev header fallback: x-dev-user: {"id":"...","email":"...","fullName":"...","role":"Employee"}
+    const raw = req.header('x-dev-user');
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed?.id) return parsed as AppUser;
+        } catch {
+            // ignore parse error
+        }
     }
+    throw new Error('Unauthenticated: missing user (set x-dev-user in dev)');
+}
+
+function toDateArray(dates: unknown): string[] {
+    if (!Array.isArray(dates)) return [];
+    return dates
+        .map(String)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        // accept "YYYY-MM-DD" or ISO; normalize to "YYYY-MM-DD"
+        .map((s) => (s.length > 10 ? s.slice(0, 10) : s));
+}
+
+function isoMidnight(dateYYYYMMDD: string): string {
+    // Render as UTC midnight ISO for the UI
+    return new Date(dateYYYYMMDD + 'T00:00:00Z').toISOString();
+}
+
+// ---------- routes ----------
+
+// quick healthcheck
+router.get('/_ping', (_req, res) => {
+    res.json({ ok: true, route: 'time-off' });
 });
 
-/** Pending (GET /api/time-off/pending) */
-router.get('/pending', requireAuth, async (_req, res) => {
+// Core create handler (mounted on two paths for compatibility)
+async function createTimeOffRequest(req: ReqWithUser, res: Response) {
+    try {
+        const user = getUser(req);
+        const { reason } = (req.body || {}) as { reason?: string };
+        const dates = toDateArray((req.body || {}).dates);
+
+        if (!dates.length) {
+            return res.status(400).json({ ok: false, error: 'At least one date is required' });
+        }
+        if (!reason || !reason.trim()) {
+            return res.status(400).json({ ok: false, error: 'Reason is required' });
+        }
+
+        const { rows } = await db.query(
+            `
+        INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
+        VALUES ($1, $2::date[], $3, 'PENDING', now())
+        RETURNING id
+      `,
+            [user.id, dates, reason.trim()]
+        );
+
+        return res.json({ ok: true, id: rows[0]?.id });
+    } catch (err: any) {
+        console.error('create time-off failed', err);
+        return res.status(400).json({ ok: false, error: err?.message || 'failed' });
+    }
+}
+
+// New endpoint (current client)
+router.post('/', createTimeOffRequest);
+
+// Back-compat alias for older clients (your UI was calling this)
+router.post('/requests', createTimeOffRequest);
+
+// List pending requests (for approvers)
+router.get('/pending', async (_req: ReqWithUser, res: Response) => {
     try {
         const { rows } = await db.query(
             `
-      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-             u.full_name AS user_name, u.email AS user_email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.status = 'PENDING'
-      ORDER BY r.created_at DESC
+        SELECT r.id,
+               r.user_id,
+               r.dates,
+               r.reason,
+               r.status,
+               r.created_at,
+               COALESCE(u.full_name, '') AS user_name,
+               COALESCE(u.email, '')     AS user_email
+        FROM time_off_requests r
+        LEFT JOIN users u ON u.id = r.user_id
+        WHERE r.status = 'PENDING'
+        ORDER BY r.created_at DESC
       `,
-            [],
+            []
         );
         res.json(rows);
-    } catch (e: any) {
-        res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
+    } catch (err: any) {
+        console.error('pending failed', err);
+        res.status(400).json({ ok: false, error: err?.message || 'failed' });
     }
 });
 
-/** Decision (PATCH /api/time-off/:id) */
-router.patch('/:id', requireAuth, async (req, res) => {
+// Approve/Decline a request
+router.patch('/:id', async (req: ReqWithUser, res: Response) => {
     try {
-        const id = req.params.id;
-        const body = DecisionReq.parse(req.body);
-        const { rows } = await db.query(
+        // (Optionally) check approver role from req.user here
+        const { id } = req.params;
+        const { decision, note } = (req.body || {}) as {
+            decision?: 'APPROVED' | 'DECLINED';
+            note?: string;
+        };
+
+        if (decision !== 'APPROVED' && decision !== 'DECLINED') {
+            return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DECLINED' });
+        }
+
+        const { rowCount } = await db.query(
             `
-      UPDATE time_off_requests
-      SET status = $2,
-          decision_note = $3,
-          decided_at = NOW(),
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING id
+        UPDATE time_off_requests
+        SET status = $2,
+            decision_note = COALESCE($3, decision_note),
+            decided_at = now()
+        WHERE id = $1
+        RETURNING id
       `,
-            [id, body.decision, body.note ?? null],
+            [id, decision, note ?? null]
         );
-        if (rows.length === 0) return res.status(404).json({ ok: false, error: 'not found' });
+
+        if (!rowCount) {
+            return res.status(404).json({ ok: false, error: 'request not found' });
+        }
+
         res.json({ ok: true });
-    } catch (e: any) {
-        res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
+    } catch (err: any) {
+        console.error('decision failed', err);
+        res.status(400).json({ ok: false, error: err?.message || 'failed' });
     }
 });
 
-/** Calendar (GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD) */
-router.get('/calendar', requireAuth, async (req, res) => {
+// Team calendar within a range
+// GET /calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get('/calendar', async (req: ReqWithUser, res: Response) => {
     try {
-        const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
-        const to = (req.query.to as string) || new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+        const user = getUser(req); // not used today, but keeps consistent auth path
 
+        const from = String(req.query.from || '').slice(0, 10);
+        const to = String(req.query.to || '').slice(0, 10);
+        if (!from || !to) {
+            return res.status(400).json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
+        }
+
+        // Select requests that have at least one date within [from, to]
         const { rows } = await db.query(
             `
-      SELECT
-        r.id,
-        r.user_id,
-        u.full_name AS user_name,
-        u.email     AS user_email,
-        r.dates,
-        r.status,
-        r.reason
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE EXISTS (
-        SELECT 1
-        FROM unnest(r.dates) AS d(actual)
-        WHERE d.actual BETWEEN $1::date AND $2::date
-      )
-      ORDER BY r.user_id, r.id DESC
+        SELECT r.id,
+               r.user_id,
+               COALESCE(u.full_name, '') AS name,
+               r.status,
+               r.reason,
+               r.dates
+        FROM time_off_requests r
+        LEFT JOIN users u ON u.id = r.user_id
+        WHERE array_length(r.dates, 1) IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM unnest(r.dates) AS d(day)
+            WHERE d.day BETWEEN $1::date AND $2::date
+          )
+        ORDER BY r.created_at DESC
       `,
-            [from, to],
+            [from, to]
         );
 
-        const entries = rows.map((r: any) => ({
-            id: r.id,
-            userId: r.user_id,
-            name: r.user_name || r.user_email,
-            status: r.status,
-            reason: r.reason,
-            dates: r.dates,
+        // Shape expected by the UI (keep backward-compatible keys)
+        const entries = rows.map((r) => ({
+            id: r.id as string,
+            userId: r.user_id as string,
+            name: (r.name as string) || '',
+            status: r.status as string,
+            reason: r.reason as string,
+            dates: Array.isArray(r.dates)
+                ? (r.dates as string[]).map((d) => isoMidnight(d))
+                : [],
         }));
+
         res.json({ entries });
-    } catch (e: any) {
-        console.error('calendar failed', e);
-        res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
+    } catch (err: any) {
+        console.error('calendar failed error:', err);
+        res.status(400).json({ ok: false, error: err?.message || 'failed' });
     }
 });
 
