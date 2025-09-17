@@ -15,7 +15,6 @@ type ReqWithUser = Request & { user?: AppUser };
 const router = Router();
 
 // Build tag so we can verify the compiled file loaded
-// (you'll see this line in PM2 logs after restart)
 console.log(
     'TIMEOFF ROUTE BUILD TAG',
     new Date().toISOString(),
@@ -25,17 +24,15 @@ console.log(
 // ---------- helpers ----------
 
 function getUser(req: ReqWithUser): AppUser {
-    // Prefer whatever upstream middleware populated
     if (req.user?.id) return req.user;
 
-    // Dev header fallback: x-dev-user: {"id":"...","email":"...","fullName":"...","role":"Employee"}
     const raw = req.header('x-dev-user');
     if (raw) {
         try {
             const parsed = JSON.parse(raw);
             if (parsed?.id) return parsed as AppUser;
         } catch {
-            // ignore parse error
+            /* ignore */
         }
     }
     throw new Error('Unauthenticated: missing user (set x-dev-user in dev)');
@@ -47,23 +44,20 @@ function toDateArray(dates: unknown): string[] {
         .map(String)
         .map((s) => s.trim())
         .filter(Boolean)
-        // accept "YYYY-MM-DD" or ISO; normalize to "YYYY-MM-DD"
         .map((s) => (s.length > 10 ? s.slice(0, 10) : s));
 }
 
 function isoMidnight(dateYYYYMMDD: string): string {
-    // Render as UTC midnight ISO for the UI
     return new Date(dateYYYYMMDD + 'T00:00:00Z').toISOString();
 }
 
 // ---------- routes ----------
 
-// quick healthcheck
 router.get('/_ping', (_req, res) => {
     res.json({ ok: true, route: 'time-off' });
 });
 
-// Core create handler (mounted on two paths for compatibility)
+// shared create handler
 async function createTimeOffRequest(req: ReqWithUser, res: Response) {
     try {
         const user = getUser(req);
@@ -93,13 +87,12 @@ async function createTimeOffRequest(req: ReqWithUser, res: Response) {
     }
 }
 
-// New endpoint (current client)
+// New endpoint
 router.post('/', createTimeOffRequest);
-
-// Back-compat alias for older clients (your UI was calling this)
+// Back-compat alias the UI was using
 router.post('/requests', createTimeOffRequest);
 
-// List pending requests (for approvers)
+// List pending (for approvers)
 router.get('/pending', async (_req: ReqWithUser, res: Response) => {
     try {
         const { rows } = await db.query(
@@ -126,10 +119,9 @@ router.get('/pending', async (_req: ReqWithUser, res: Response) => {
     }
 });
 
-// Approve/Decline a request
+// Approve/Decline
 router.patch('/:id', async (req: ReqWithUser, res: Response) => {
     try {
-        // (Optionally) check approver role from req.user here
         const { id } = req.params;
         const { decision, note } = (req.body || {}) as {
             decision?: 'APPROVED' | 'DECLINED';
@@ -140,7 +132,7 @@ router.patch('/:id', async (req: ReqWithUser, res: Response) => {
             return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DECLINED' });
         }
 
-        const { rowCount } = await db.query(
+        const { rows } = await db.query(
             `
         UPDATE time_off_requests
         SET status = $2,
@@ -152,7 +144,7 @@ router.patch('/:id', async (req: ReqWithUser, res: Response) => {
             [id, decision, note ?? null]
         );
 
-        if (!rowCount) {
+        if (!rows.length) {
             return res.status(404).json({ ok: false, error: 'request not found' });
         }
 
@@ -163,11 +155,10 @@ router.patch('/:id', async (req: ReqWithUser, res: Response) => {
     }
 });
 
-// Team calendar within a range
-// GET /calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+// Team calendar
 router.get('/calendar', async (req: ReqWithUser, res: Response) => {
     try {
-        const user = getUser(req); // not used today, but keeps consistent auth path
+        getUser(req); // ensures auth path; not used further
 
         const from = String(req.query.from || '').slice(0, 10);
         const to = String(req.query.to || '').slice(0, 10);
@@ -175,38 +166,34 @@ router.get('/calendar', async (req: ReqWithUser, res: Response) => {
             return res.status(400).json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
         }
 
-        // Select requests that have at least one date within [from, to]
         const { rows } = await db.query(
             `
-        SELECT r.id,
-               r.user_id,
-               COALESCE(u.full_name, '') AS name,
-               r.status,
-               r.reason,
-               r.dates
-        FROM time_off_requests r
-        LEFT JOIN users u ON u.id = r.user_id
-        WHERE array_length(r.dates, 1) IS NOT NULL
-          AND EXISTS (
-            SELECT 1
-            FROM unnest(r.dates) AS d(day)
-            WHERE d.day BETWEEN $1::date AND $2::date
-          )
-        ORDER BY r.created_at DESC
-      `,
+                SELECT r.id,
+                       r.user_id,
+                       COALESCE(u.full_name, '') AS name,
+                       r.status,
+                       r.reason,
+                       r.dates
+                FROM time_off_requests r
+                         LEFT JOIN users u ON u.id = r.user_id
+                WHERE array_length(r.dates, 1) IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM unnest(r.dates) AS d(day)
+                    WHERE d.day BETWEEN $1::date AND $2::date
+                )
+                ORDER BY r.created_at DESC
+            `,
             [from, to]
         );
 
-        // Shape expected by the UI (keep backward-compatible keys)
         const entries = rows.map((r) => ({
             id: r.id as string,
             userId: r.user_id as string,
             name: (r.name as string) || '',
             status: r.status as string,
             reason: r.reason as string,
-            dates: Array.isArray(r.dates)
-                ? (r.dates as string[]).map((d) => isoMidnight(d))
-                : [],
+            dates: Array.isArray(r.dates) ? (r.dates as string[]).map((d) => isoMidnight(d)) : [],
         }));
 
         res.json({ entries });
