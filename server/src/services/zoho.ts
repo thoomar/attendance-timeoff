@@ -1,173 +1,335 @@
-import { pool } from '../db';
+// server/src/services/zoho.ts
 
 /**
- * NOTE: We rely on env vars:
- *  - ZOHO_CLIENT_ID
- *  - ZOHO_CLIENT_SECRET
- *  - ZOHO_SCOPES (comma-separated)
- *  - ZOHO_ACCOUNTS_BASE (e.g. https://accounts.zoho.com)
- *  - ZOHO_REDIRECT_URI (e.g. https://timeoff.timesharehelpcenter.com/api/zoho/callback)
+ * Zoho OAuth service:
+ * - Build consent URL
+ * - Exchange/refresh tokens
+ * - Persist tokens with robust ON CONFLICT by constraint name
+ * - Simple cron flow when run with: node dist/services/zoho.js --mode=cron --windowMins=60
  */
 
+import { URLSearchParams } from 'url';
+import * as db from '../db';
+
 const {
-  ZOHO_CLIENT_ID,
-  ZOHO_CLIENT_SECRET,
-  ZOHO_SCOPES,
-  ZOHO_ACCOUNTS_BASE,
-  ZOHO_REDIRECT_URI,
+    ZOHO_CLIENT_ID = '',
+    ZOHO_CLIENT_SECRET = '',
+    ZOHO_REDIRECT_URI = '',
+    // Optional region overrides
+    ZOHO_ACCOUNTS_BASE, // e.g. "https://accounts.zoho.com" | "https://accounts.zoho.eu"
+    ZOHO_API_BASE,      // e.g. "https://www.zohoapis.com" | "https://www.zohoapis.eu"
 } = process.env;
 
-if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_SCOPES || !ZOHO_ACCOUNTS_BASE || !ZOHO_REDIRECT_URI) {
-  // Don't throw at import time in case tests/scripts load this; we fail later with clear messages.
-  console.warn('[zoho] Missing one or more required env vars (CLIENT_ID/SECRET/SCOPES/ACCOUNTS_BASE/REDIRECT_URI)');
+function accountsBase() {
+    return (ZOHO_ACCOUNTS_BASE || 'https://accounts.zoho.com').replace(/\/+$/,'');
+}
+function apiBase(fallbackFromToken?: string | null) {
+    const fb = (fallbackFromToken && fallbackFromToken.trim()) || ZOHO_API_BASE || 'https://www.zohoapis.com';
+    return fb.replace(/\/+$/,'');
 }
 
-// Use the global fetch from Node 18+ but avoid TS DOM typings;
-const f: (input: any, init?: any) => Promise<any> = (globalThis as any).fetch;
+/** Scopes your app requires (space-delimited). Keep in sync with your Zoho console. */
+const DEFAULT_SCOPE =
+    process.env.ZOHO_SCOPE ||
+    'ZohoCRM.users.READ';
 
-/** Derive Zoho API base from accounts base (e.g., .com -> www.zohoapis.com, .eu -> www.zohoapis.eu) */
-function getZohoApiBase(): string {
-  try {
-    const u = new URL(ZOHO_ACCOUNTS_BASE!); // e.g., https://accounts.zoho.com
-    const host = u.hostname;                // accounts.zoho.com
-    const tld = host.split('.').pop();      // com
-    return `https://www.zohoapis.${tld}`;
-  } catch {
-    // fallback to US
-    return 'https://www.zohoapis.com';
-  }
+function nowPlusSeconds(seconds: number) {
+    const s = Math.max(0, seconds);
+    return new Date(Date.now() + s * 1000);
 }
 
-/** Build the Zoho authorize URL */
-export function authorizeUrl(state: string): string {
-  if (!ZOHO_CLIENT_ID || !ZOHO_SCOPES || !ZOHO_REDIRECT_URI || !ZOHO_ACCOUNTS_BASE) {
-    throw new Error('Zoho env vars not configured');
-  }
-  const auth = new URL('/oauth/v2/auth', ZOHO_ACCOUNTS_BASE);
-  const qs = new URLSearchParams({
-    response_type: 'code',
-    client_id: ZOHO_CLIENT_ID,
-    scope: ZOHO_SCOPES,
-    redirect_uri: ZOHO_REDIRECT_URI,
-    access_type: 'offline',
-    prompt: 'consent',
-    state,
-  });
-  auth.search = qs.toString();
-  return auth.toString();
+/** ---------- Public API used by routes ---------- */
+
+export function buildAuthUrl(state?: string) {
+    const qp = new URLSearchParams({
+        response_type: 'code',
+        client_id: ZOHO_CLIENT_ID,
+        scope: DEFAULT_SCOPE,
+        redirect_uri: ZOHO_REDIRECT_URI,
+        access_type: 'offline',
+        prompt: 'consent',
+    });
+    if (state) qp.set('state', state);
+    return `${accountsBase()}/oauth/v2/auth?${qp.toString()}`;
 }
 
-/** Exchange authorization code for tokens */
-export async function exchangeCodeForToken(code: string): Promise<{
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  scope?: string;
-  token_type?: string;
-}> {
-  if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REDIRECT_URI || !ZOHO_ACCOUNTS_BASE) {
-    throw new Error('Zoho env vars not configured');
-  }
-  const tokenUrl = new URL('/oauth/v2/token', ZOHO_ACCOUNTS_BASE);
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: ZOHO_CLIENT_ID,
-    client_secret: ZOHO_CLIENT_SECRET,
-    redirect_uri: ZOHO_REDIRECT_URI,
-    code,
-  });
+export async function handleCallback(appUserId: string, code: string) {
+    // Exchange code -> tokens
+    const tokenRes = await exchangeCode(code);
+    // Fetch Zoho user info to determine stable zoho_user_id
+    const who = await fetchZohoUserInfo(tokenRes.access_token, tokenRes.api_domain);
+    const zohoUserId = String(who?.ZUID ?? who?.user_id ?? who?.id ?? '');
 
-  const resp = await f(tokenUrl.toString(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`Zoho token exchange failed (${resp.status}): ${text}`);
-  }
-  return resp.json();
+    if (!zohoUserId) {
+        throw new Error('Zoho user id not found from /oauth/user/info');
+    }
+
+    await upsertTokens({
+        appUserId,
+        zohoUserId,
+        token: tokenRes,
+    });
+
+    return { ok: true, zohoUserId };
 }
 
-/** Refresh access token (not used yet but useful) */
-export async function refreshAccessToken(refresh_token: string): Promise<{
-  access_token: string;
-  expires_in: number;
-  scope?: string;
-  token_type?: string;
-}> {
-  if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_ACCOUNTS_BASE) {
-    throw new Error('Zoho env vars not configured');
-  }
-  const tokenUrl = new URL('/oauth/v2/token', ZOHO_ACCOUNTS_BASE);
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: ZOHO_CLIENT_ID,
-    client_secret: ZOHO_CLIENT_SECRET,
-    refresh_token,
-  });
-
-  const resp = await f(tokenUrl.toString(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`Zoho token refresh failed (${resp.status}): ${text}`);
-  }
-  return resp.json();
+export async function getStatus(appUserId?: string) {
+    if (appUserId) {
+        const { rows } = await db.query(
+            `
+      SELECT id, user_id, zoho_user_id, revoked, expires_at, scope, api_domain, token_type, updated_at
+      FROM zoho_tokens
+      WHERE revoked IS NOT TRUE AND user_id = $1
+      ORDER BY updated_at DESC
+      LIMIT 1
+      `,
+            [appUserId],
+        );
+        return rows[0] || null;
+    }
+    const { rows } = await db.query(
+        `
+    SELECT count(*)::int AS active_count
+    FROM zoho_tokens
+    WHERE revoked IS NOT TRUE AND expires_at > now()
+    `,
+        [],
+    );
+    return rows[0] || { active_count: 0 };
 }
 
-/** Fetch the current Zoho user (optional, for auditing) */
-export async function fetchZohoUser(accessToken: string): Promise<any> {
-  const apiBase = getZohoApiBase(); // e.g., https://www.zohoapis.com
-  const url = `${apiBase}/crm/v3/users?type=CurrentUser`;
-  const resp = await f(url, { headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`Zoho fetch user failed (${resp.status}): ${text}`);
-  }
-  return resp.json();
+/**
+ * Returns a valid access token for the given app user:
+ * - If near expiry, auto-refresh
+ * - Throws if no token found
+ */
+export async function getAccessTokenForUser(appUserId: string) {
+    const row = await getActiveRow(appUserId);
+    if (!row) throw new Error('No Zoho token for user');
+
+    const secondsLeft = (new Date(row.expires_at).getTime() - Date.now()) / 1000;
+    if (secondsLeft <= 120) {
+        const refreshed = await refreshWithRow(row);
+        return refreshed.access_token;
+    }
+    return row.access_token as string;
 }
 
-export type SaveTokensInput = {
-  userId: string;
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: Date;
-  zohoUserId?: string | null;
+/** ---------- Token Exchange / Refresh ---------- */
+
+type TokenResponse = {
+    access_token: string;
+    refresh_token?: string;
+    token_type?: string;
+    expires_in?: number;
+    api_domain?: string;
+    scope?: string;
 };
 
-/** Persist tokens into zoho_tokens (upsert by user_id) */
-export async function saveZohoTokens(input: SaveTokensInput): Promise<void> {
-  const { userId, accessToken, refreshToken, expiresAt, zohoUserId } = input;
-  const sql = `
-    INSERT INTO zoho_tokens (user_id, access_token, refresh_token, expires_at, zoho_user_id)
-    VALUES ($1, $2, $3, $4, $5)
-    ON CONFLICT (user_id) DO UPDATE
-      SET access_token = EXCLUDED.access_token,
-          refresh_token = EXCLUDED.refresh_token,
-          expires_at = EXCLUDED.expires_at,
-          zoho_user_id = EXCLUDED.zoho_user_id,
-          updated_at = NOW()
-  `;
-  await pool.query(sql, [userId, accessToken, refreshToken, expiresAt, zohoUserId ?? null]);
+async function exchangeCode(code: string): Promise<TokenResponse> {
+    const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: ZOHO_CLIENT_ID,
+        client_secret: ZOHO_CLIENT_SECRET,
+        redirect_uri: ZOHO_REDIRECT_URI,
+        code,
+    });
+
+    const res = await fetch(`${accountsBase()}/oauth/v2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+    });
+
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Zoho token exchange failed: ${res.status} ${txt}`);
+    }
+
+    return (await res.json()) as TokenResponse;
 }
 
-/** Back-compat alias for older callers (saveTokens(userId, tok)) */
-export async function saveTokens(userId: string, tok: {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  scope?: string;
+async function refresh(refresh_token: string): Promise<TokenResponse> {
+    const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: ZOHO_CLIENT_ID,
+        client_secret: ZOHO_CLIENT_SECRET,
+        refresh_token,
+    });
+
+    const res = await fetch(`${accountsBase()}/oauth/v2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+    });
+
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Zoho token refresh failed: ${res.status} ${txt}`);
+    }
+
+    return (await res.json()) as TokenResponse;
+}
+
+async function fetchZohoUserInfo(access_token: string, apiDomainFromToken?: string | null) {
+    const res = await fetch(`${apiBase(apiDomainFromToken)}/oauth/user/info`, {
+        headers: { Authorization: `Zoho-oauthtoken ${access_token}` },
+    });
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Zoho /oauth/user/info failed: ${res.status} ${txt}`);
+    }
+    return await res.json();
+}
+
+/** ---------- Persistence ---------- */
+
+async function upsertTokens(args: {
+    appUserId: string;
+    zohoUserId: string;
+    token: TokenResponse;
 }) {
-  const expiresAt = new Date(Date.now() + (tok.expires_in - 60) * 1000);
-  await saveZohoTokens({
-    userId,
-    accessToken: tok.access_token,
-    refreshToken: tok.refresh_token,
-    expiresAt,
-    zohoUserId: null,
-  });
+    const { appUserId, zohoUserId, token } = args;
+
+    // Some Zoho responses omit fields like scope/api_domain/token_type
+    const access_token = token.access_token;
+    const refresh_token = token.refresh_token || (await getRefreshTokenFallback(zohoUserId));
+    const token_type = token.token_type ?? null;
+    const api_domain = token.api_domain ?? null;
+    const scope = token.scope ?? ''; // tolerate NOT NULL schemas
+
+    if (!access_token) throw new Error('Missing access_token');
+    if (!refresh_token) throw new Error('Missing refresh_token');
+
+    const expiresInSec = typeof token.expires_in === 'number' ? token.expires_in : 3600;
+    // Refresh 60s early
+    const expires_at = nowPlusSeconds(Math.max(0, expiresInSec - 60));
+
+    // Use the *constraint name* to avoid "no unique or exclusion constraint" errors
+    await db.query(
+        `
+    INSERT INTO zoho_tokens (
+      user_id, access_token, refresh_token, expires_at,
+      zoho_user_id, scope, api_domain, token_type, revoked, created_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false, now(), now())
+    ON CONFLICT ON CONSTRAINT zoho_tokens_zoho_user_id_key
+    DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      refresh_token = EXCLUDED.refresh_token,
+      expires_at    = EXCLUDED.expires_at,
+      scope         = COALESCE(NULLIF(EXCLUDED.scope, ''), zoho_tokens.scope),
+      api_domain    = COALESCE(EXCLUDED.api_domain, zoho_tokens.api_domain),
+      token_type    = COALESCE(EXCLUDED.token_type, zoho_tokens.token_type),
+      revoked       = false,
+      updated_at    = now()
+    `,
+        [
+            appUserId,
+            access_token,
+            refresh_token,
+            expires_at,
+            zohoUserId,
+            scope,
+            api_domain,
+            token_type,
+        ],
+    );
+}
+
+async function getRefreshTokenFallback(zohoUserId: string): Promise<string | null> {
+    const { rows } = await db.query(
+        `
+    SELECT refresh_token
+    FROM zoho_tokens
+    WHERE zoho_user_id = $1
+    ORDER BY updated_at DESC
+    LIMIT 1
+    `,
+        [zohoUserId],
+    );
+    return rows[0]?.refresh_token ?? null;
+}
+
+async function getActiveRow(appUserId: string) {
+    const { rows } = await db.query(
+        `
+    SELECT *
+    FROM zoho_tokens
+    WHERE revoked IS NOT TRUE AND user_id = $1
+    ORDER BY updated_at DESC
+    LIMIT 1
+    `,
+        [appUserId],
+    );
+    return rows[0];
+}
+
+async function refreshWithRow(row: any): Promise<TokenResponse> {
+    const token = await refresh(row.refresh_token);
+    const zohoUserId = String(row.zoho_user_id);
+    await upsertTokens({
+        appUserId: String(row.user_id),
+        zohoUserId,
+        token,
+    });
+    return token;
+}
+
+/** ---------- Cron (used by pm2 process "zoho-refresh-cron") ---------- */
+
+export async function refreshExpiringTokens(windowMins: number = 60) {
+    // Find tokens expiring within the next window and refresh them
+    const { rows } = await db.query(
+        `
+    SELECT *
+    FROM zoho_tokens
+    WHERE revoked IS NOT TRUE
+      AND expires_at <= NOW() + (($1::text || ' minutes')::interval)
+    ORDER BY expires_at ASC
+    `,
+        [String(windowMins)],
+    );
+
+    for (const row of rows) {
+        try {
+            await refreshWithRow(row);
+            // eslint-disable-next-line no-console
+            console.log(`[zoho] refreshed token for user_id=${row.user_id} zoho_user_id=${row.zoho_user_id}`);
+        } catch (e: any) {
+            // eslint-disable-next-line no-console
+            console.error('[zoho] refresh failed', {
+                user_id: row.user_id,
+                zoho_user_id: row.zoho_user_id,
+                error: e?.message || String(e),
+            });
+        }
+    }
+}
+
+/** ---------- CLI Entrypoint ---------- */
+
+if (require.main === module) {
+    (async () => {
+        const argv = new Map<string, string>();
+        for (let i = 2; i < process.argv.length; i++) {
+            const [k, v] = process.argv[i].split('=');
+            if (k) argv.set(k.replace(/^--/,'').toLowerCase(), v ?? 'true');
+        }
+
+        const mode = argv.get('mode');
+        if (mode === 'cron') {
+            const mins = Number(argv.get('windowmins') || '60') || 60;
+            await refreshExpiringTokens(mins);
+            process.exit(0);
+        } else {
+            // eslint-disable-next-line no-console
+            console.log('[zoho] service module executed without --mode=cron; nothing to do.');
+            process.exit(0);
+        }
+    })().catch(err => {
+        // eslint-disable-next-line no-console
+        console.error('[zoho] fatal', err);
+        process.exit(1);
+    });
 }
