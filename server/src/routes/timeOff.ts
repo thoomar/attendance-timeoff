@@ -2,7 +2,7 @@
 import express, { Request, Response, NextFunction, RequestHandler } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
-import * as db from '../db'; // ✅ works whether db.ts exports { query } or others (use (db as any).query)
+import * as db from '../db'; // using as-any query calls for compatibility
 import { sendEmail } from '../services/email';
 
 const router = express.Router();
@@ -36,7 +36,7 @@ const DEFAULT_MANAGER_USER_ID = process.env.DEFAULT_MANAGER_USER_ID || null;
    =========================== */
 
 const CreateReq = z.object({
-    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
+    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1), // YYYY-MM-DD
     reason: z.string().min(3)
 });
 
@@ -96,30 +96,19 @@ function renderDecisionEmail(
 }
 
 /* ===========================
-   Routes
+   Routes  (NO /time-off prefix here)
+   Mounted at /api/time-off in index.ts
    =========================== */
 
-/**
- * Create a time off request (one row per date)
- * - Notifies HR alias
- * - Notifies approvers list
- */
-router.post('/time-off/request', requireAuth, async (req: Request, res: Response) => {
+/** Create request: POST /api/time-off/request */
+router.post('/request', requireAuth, async (req: Request, res: Response) => {
     const parse = CreateReq.safeParse(req.body);
-    if (!parse.success) {
-        return res.status(400).json({ ok: false, error: parse.error.flatten() });
-    }
+    if (!parse.success) return res.status(400).json({ ok: false, error: parse.error.flatten() });
 
     const { dates, reason } = parse.data;
-    const authed = (req as any).user as {
-        id: string;
-        email?: string | null;
-        fullName?: string | null;
-        role?: string;
-    };
+    const authed = (req as any).user as { id: string; email?: string | null; fullName?: string | null };
 
     try {
-        // Insert one row per date
         const insertedRows: Array<{ id: string; date: string }> = [];
         for (const day of dates) {
             const q = `
@@ -133,7 +122,7 @@ router.post('/time-off/request', requireAuth, async (req: Request, res: Response
             if (row) insertedRows.push(row);
         }
 
-        // Send HR notification (single email covering all dates)
+        // Email HR + approvers
         const hrHtml = renderSubmittedEmail(authed, dates, reason);
         await sendEmail({
             to: [HR_ALIAS],
@@ -141,7 +130,6 @@ router.post('/time-off/request', requireAuth, async (req: Request, res: Response
             html: hrHtml
         });
 
-        // Send approver notifications (one email to the group)
         if (approverEmails.length > 0) {
             const approverHtml = renderApproverEmail(authed, dates, reason);
             await sendEmail({
@@ -158,10 +146,8 @@ router.post('/time-off/request', requireAuth, async (req: Request, res: Response
     }
 });
 
-/**
- * Get my requests (all statuses)
- */
-router.get('/time-off/mine', requireAuth, async (req: Request, res: Response) => {
+/** Mine: GET /api/time-off/mine */
+router.get('/mine', requireAuth, async (req: Request, res: Response) => {
     const authed = (req as any).user as { id: string };
     try {
         const q = `
@@ -178,10 +164,8 @@ router.get('/time-off/mine', requireAuth, async (req: Request, res: Response) =>
     }
 });
 
-/**
- * Pending requests (manager/admin)
- */
-router.get('/time-off/pending', requireAuth, requireManagerOrAdmin, async (_req: Request, res: Response) => {
+/** Pending: GET /api/time-off/pending (manager/admin) */
+router.get('/pending', requireAuth, requireManagerOrAdmin, async (_req: Request, res: Response) => {
     try {
         const q = `
             SELECT
@@ -205,14 +189,10 @@ router.get('/time-off/pending', requireAuth, requireManagerOrAdmin, async (_req:
     }
 });
 
-/**
- * Approve/Reject a single request row by id
- */
-router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async (req: Request, res: Response) => {
+/** Decision: POST /api/time-off/:id/decision (manager/admin) */
+router.post('/:id/decision', requireAuth, requireManagerOrAdmin, async (req: Request, res: Response) => {
     const parse = DecisionReq.safeParse(req.body);
-    if (!parse.success) {
-        return res.status(400).json({ ok: false, error: parse.error.flatten() });
-    }
+    if (!parse.success) return res.status(400).json({ ok: false, error: parse.error.flatten() });
     const { decision, note } = parse.data;
 
     const id = req.params.id;
@@ -232,17 +212,15 @@ router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async 
 
         if (!updated) return res.status(404).json({ ok: false, error: 'Request not found' });
 
-        // Get employee email/name to notify
+        // Notify employee
         const uQ = `SELECT full_name, email FROM users WHERE id = $1`;
         const uRes = await (db as any).query(uQ, [updated.employee_user_id]);
-        const user = (uRes?.rows?.[0] ??
-            { full_name: null, email: null }) as { full_name: string | null; email: string | null };
+        const user = (uRes?.rows?.[0] ?? { full_name: null, email: null }) as { full_name: string | null; email: string | null };
 
-        const targetEmail = user.email;
-        if (targetEmail) {
+        if (user.email) {
             const html = renderDecisionEmail({ fullName: user.full_name, email: user.email }, decision, updated.date, note);
             await sendEmail({
-                to: [targetEmail],
+                to: [user.email],
                 subject: `Your time off request for ${updated.date} was ${decision}`,
                 html
             });
@@ -255,11 +233,8 @@ router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async 
     }
 });
 
-/**
- * Calendar view (approved + pending) in a date window.
- * Query params: from=YYYY-MM-DD, to=YYYY-MM-DD
- */
-router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
+/** Calendar: GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD */
+router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     const from = String(req.query.from ?? '').trim();
     const to = String(req.query.to ?? '').trim();
 
@@ -301,7 +276,4 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
     }
 });
 
-/* ===========================
-   Export
-   =========================== */
 export default router;
