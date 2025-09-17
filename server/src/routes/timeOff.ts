@@ -1,7 +1,7 @@
 // server/src/routes/timeOff.ts
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
-import * as db from '../db'; // module-namespace import for db.query
+import * as db from '../db'; // your project uses module-namespace import
 import { requireAuth } from '../auth';
 import { sendEmail } from '../services/email';
 
@@ -29,6 +29,7 @@ const DecisionReq = z.object({
 
 /** Utilities */
 function asDate(s: string) {
+    // store as UTC date in DATE[]; Postgres DATE has no TZ, but we normalize input
     return new Date(`${s}T00:00:00.000Z`);
 }
 
@@ -43,8 +44,8 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
 
         const { rows } = await db.query(
             `
-                INSERT INTO time_off_requests (user_id, dates, reason, status)
-                VALUES ($1, $2::date[], $3, 'PENDING')
+                INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
+                VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
                     RETURNING id
             `,
             [user.id, dates, body.reason],
@@ -60,7 +61,6 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
         const to = ['hr@republicfinancialservices.com', ...approverEmails];
 
         await sendEmail({
-            // no `from` field (mailer default sender is used)
             to,
             subject,
             text,
@@ -101,7 +101,10 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
         const { rows } = await db.query(
             `
                 UPDATE time_off_requests
-                SET status = $2, decision_note = $3, decided_at = NOW()
+                SET status = $2,
+                    decision_note = $3,
+                    decided_at = NOW(),
+                    updated_at = NOW()
                 WHERE id = $1
                     RETURNING id
             `,
@@ -117,7 +120,7 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
     }
 });
 
-// Calendar (range)
+// Calendar (range) — works with DATE[] and no employee_user_id usage
 router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
@@ -129,7 +132,7 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
                     r.id,
                     r.user_id,
                     u.full_name AS user_name,
-                    u.email AS user_email,
+                    u.email     AS user_email,
                     r.dates,
                     r.status,
                     r.reason
@@ -156,7 +159,6 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
 
         return res.json({ entries });
     } catch (e: any) {
-        // eslint-disable-next-line no-console
         console.error('calendar failed', e);
         return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
