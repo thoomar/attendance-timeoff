@@ -6,28 +6,35 @@ import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal } from 'lucide
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
+
 type User = { id: string; name: string; role: Role };
 
-// Server calendar entry shape
-type CalendarEntry = { userId: string; userName: string; dates: string[]; status: 'PENDING' | 'APPROVED' };
+// Server calendar entry shape (normalized below)
+type CalendarEntry = {
+    userId: string;
+    userName: string;
+    dates: string[];             // ISO strings
+    status: 'PENDING' | 'APPROVED';
+    submittedAt?: string;        // ISO (created_at)
+};
 
-// We’ll normalize “pending” into this UI-friendly item
+// Pending approval item (manager)
 type PendingUIItem = {
-    id: string;                 // single request id (per date)
+    id: string;
     employeeName?: string;
     employeeEmail?: string;
-    date: string;               // one date
+    date: string;                // "YYYY-MM-DD" or range
     reason: string;
+    submittedAt?: string;        // ISO
 };
 
 /** ----------------- Helpers for the Zoho loop fix ----------------- */
 function parseZohoCallbackFlag(): boolean {
     const params = new URLSearchParams(window.location.search);
-    const a = params.get('zoho') === 'connected';     // supports ?zoho=connected
-    const b = params.get('connected') === 'zoho';     // supports ?connected=zoho
+    const a = params.get('zoho') === 'connected';
+    const b = params.get('connected') === 'zoho';
     return a || b;
 }
-
 function stripQueryParams(): void {
     const url = new URL(window.location.href);
     if (url.search) {
@@ -36,6 +43,28 @@ function stripQueryParams(): void {
     }
 }
 /** ----------------------------------------------------------------- */
+
+/** Formatting helpers */
+function fmtTimeLocal(iso?: string): string {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+function fmtMDY(isoDate: string): string {
+    // isoDate can be "YYYY-MM-DD" or ISO timestamp. Always format to MM/DD/YYYY.
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return isoDate;
+    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+}
+function fmtDateRange(isoDates: string[]): string {
+    if (!isoDates?.length) return '';
+    const uniques = Array.from(new Set(isoDates.map(s => s.slice(0, 10))));
+    uniques.sort();
+    const start = fmtMDY(uniques[0]);
+    const end = uniques.length > 1 ? fmtMDY(uniques[uniques.length - 1]) : '';
+    return end ? `${start} - ${end}` : start;
+}
 
 export default function TimeOffPage() {
     const [user, setUser] = useState<User | null>(null);
@@ -51,6 +80,7 @@ export default function TimeOffPage() {
     // Sentinel: did we just return from Zoho?
     const justReturnedFromZoho = useMemo<boolean>(parseZohoCallbackFlag, []);
 
+    // --- Zoho connection check / redirect ---
     useEffect(() => {
         let cancelled = false;
 
@@ -60,24 +90,19 @@ export default function TimeOffPage() {
                 const d = await r.json();
                 if (cancelled) return;
 
-                // ensure boolean (not string | null)
                 const isConnected = Boolean(d?.connected);
                 setZohoConnected(isConnected);
 
-                // If connected and came back with a query flag, clean the URL once
                 if (isConnected && justReturnedFromZoho) {
                     stripQueryParams();
                     return;
                 }
 
-                // If NOT connected and we did NOT just return from Zoho, start OAuth exactly once
                 if (!isConnected && !justReturnedFromZoho) {
-                    const returnTo = '/'; // Landing page after consent
+                    const returnTo = '/';
                     window.location.assign(`/api/zoho/start?returnTo=${encodeURIComponent(returnTo)}`);
                 }
-                // If not connected but we *did* just return, wait for next pass (server may be finalizing)
-
-            } catch (_e) {
+            } catch {
                 if (!cancelled) setZohoConnected(false);
             }
         })();
@@ -87,52 +112,76 @@ export default function TimeOffPage() {
         };
     }, [justReturnedFromZoho]);
 
+    // --- Load current user ---
     useEffect(() => {
-        fetch('/api/me').then(r => r.json()).then(setUser).catch(() => setUser(null));
+        (async () => {
+            try {
+                const r = await fetch('/api/me');
+                const d = await r.json();
+                // backend returns { id, email, fullName, role }
+                const mapped: User = { id: d?.id, name: d?.fullName || d?.name || 'User', role: d?.role };
+                setUser(mapped);
+            } catch {
+                setUser(null);
+            }
+        })();
     }, []);
 
+    // --- Load calendar (employee vs manager endpoint) ---
     useEffect(() => {
+        if (!user) return;
+
         const from = new Date();
         const to = new Date();
         to.setMonth(to.getMonth() + 2);
         const qs = `from=${from.toISOString().slice(0, 10)}&to=${to.toISOString().slice(0, 10)}`;
-        fetch(`/api/time-off/calendar?${qs}`)
-            .then(r => r.json())
-            .then(d => setCalendar(Array.isArray(d.entries) ? d.entries : []))
-            .catch(() => setCalendar([]));
-    }, []);
 
+        const managerView = user.role === 'Manager' || user.role === 'Admin';
+        const url = managerView
+            ? `/api/time-off/manager/calendar?${qs}`
+            : `/api/time-off/calendar?${qs}`;
+
+        fetch(url)
+            .then(r => r.json())
+            .then((d: any) => {
+                const entries: CalendarEntry[] = Array.isArray(d?.entries)
+                    ? d.entries.map((e: any) => ({
+                        userId: e.userId || e.user_id || '',
+                        userName: e.name || e.userName || user.name,
+                        dates: Array.isArray(e.dates) ? e.dates : [],
+                        status: e.status,
+                        submittedAt: e.created_at || e.submittedAt,
+                    }))
+                    : [];
+                setCalendar(entries);
+            })
+            .catch(() => setCalendar([]));
+    }, [user]);
+
+    // --- Load pending approvals (managers only) ---
     useEffect(() => {
         if (!user) return;
         if (user.role === 'Manager' || user.role === 'Admin') {
             fetch('/api/time-off/pending')
                 .then(r => r.json())
                 .then((raw: any) => {
-                    // Normalize either grouped response or flat items
-                    // Grouped example item: { employee_user_id, start, end, reason, ids: [...] }
-                    // Flat example item: { id, employee_user_id, date, reason, status, full_name?, email? }
                     const out: PendingUIItem[] = [];
                     if (Array.isArray(raw)) {
                         for (const item of raw) {
-                            if (Array.isArray(item?.ids) && (item.start || item.end)) {
-                                for (const id of item.ids) {
-                                    out.push({
-                                        id,
-                                        employeeName: item.full_name ?? undefined,
-                                        employeeEmail: item.email ?? undefined,
-                                        date:
-                                            (item.start ?? '').slice(0, 10) +
-                                            (item.end && item.end !== item.start ? ` – ${String(item.end).slice(0, 10)}` : ''),
-                                        reason: item.reason ?? '',
-                                    });
-                                }
-                            } else if (item?.id) {
+                            // Flat server shape from /pending:
+                            // { id, user_id, dates, reason, status, created_at, user_name, user_email }
+                            if (item?.id) {
+                                const range =
+                                    Array.isArray(item.dates) && item.dates.length
+                                        ? fmtDateRange(item.dates)
+                                        : (item.date ? fmtMDY(item.date) : '—');
                                 out.push({
                                     id: item.id,
-                                    employeeName: item.full_name ?? undefined,
-                                    employeeEmail: item.email ?? undefined,
-                                    date: (item.date ?? '').slice(0, 10),
+                                    employeeName: item.user_name ?? item.full_name ?? undefined,
+                                    employeeEmail: item.user_email ?? item.email ?? undefined,
+                                    date: range,
                                     reason: item.reason ?? '',
+                                    submittedAt: item.created_at,
                                 });
                             }
                         }
@@ -145,6 +194,7 @@ export default function TimeOffPage() {
 
     const isRequester = useMemo(() => !['Manager', 'Admin'].includes(user?.role || ''), [user]);
 
+    // --- Create request ---
     async function submit() {
         try {
             const parsed = CreateReq.parse({ dates: selected, reason });
@@ -183,12 +233,13 @@ export default function TimeOffPage() {
         }
     }
 
+    // --- Approve / Reject (PATCH /api/time-off/:id) ---
     async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
         try {
-            const res = await fetch(`/api/time-off/decision`, {
-                method: 'POST',
+            const res = await fetch(`/api/time-off/${encodeURIComponent(id)}`, {
+                method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id, decision }),
+                body: JSON.stringify({ decision, note: '' }),
             });
             if (!res.ok) {
                 const txt = await res.text();
@@ -223,7 +274,7 @@ export default function TimeOffPage() {
 
     return (
         <div className="min-h-dvh">
-            {/* Top bar with dark logo */}
+            {/* Top bar */}
             <header className="sticky top-0 z-30 backdrop-blur bg-black/40 border-b border-slate-800">
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -242,10 +293,11 @@ export default function TimeOffPage() {
             {/* Page */}
             <main className="mx-auto max-w-6xl px-6 py-8">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* LEFT: Calendar + request form */}
+                    {/* LEFT */}
                     <section className="card p-6">
                         <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
-                            <CalendarDays className="h-5 w-5 text-blue-400" /> Team Calendar
+                            <CalendarDays className="h-5 w-5 text-blue-400" />
+                            {['Manager', 'Admin'].includes(user.role) ? 'Manager Calendar' : 'Team Calendar'}
                         </h2>
 
                         <DayPicker
@@ -281,7 +333,7 @@ export default function TimeOffPage() {
                         )}
                     </section>
 
-                    {/* RIGHT: Upcoming approved */}
+                    {/* RIGHT: Upcoming */}
                     <aside className="card p-6">
                         <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
                             <CheckCircle2 className="h-5 w-5 text-emerald-400" /> Upcoming Approved Time Off
@@ -294,16 +346,20 @@ export default function TimeOffPage() {
                                 {calendar.map((e, i) => {
                                     const initials =
                                         e.userName?.split(/\s+/).map(p => p[0]).join('').slice(0, 2).toUpperCase() || '✓';
+                                    const submitted = e.submittedAt ? fmtTimeLocal(e.submittedAt) : '';
+                                    const range = fmtDateRange(e.dates || []);
                                     return (
                                         <li key={i} className="flex items-start gap-3 text-sm">
                       <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 text-slate-200">
                         {initials}
                       </span>
                                             <div className="space-y-0.5">
-                                                {e.userName && <div className="font-medium">{e.userName}</div>}
+                                                {/* “Submitted: 2:40 PM — Name — for 09/17/2025 - 09/18/2025” */}
                                                 <div className="text-slate-300">
-                                                    {e.dates.join(', ')}{' '}
-                                                    {e.status === 'PENDING' ? <span className="text-amber-400">(pending)</span> : null}
+                                                    {submitted && <strong>Submitted:</strong>} {submitted || '—'}
+                                                    {e.userName ? <> — <strong>{e.userName}</strong></> : null}
+                                                    {range ? <> — for <strong>{range}</strong></> : null}
+                                                    {e.status === 'PENDING' ? <> <span className="text-amber-400">(pending)</span></> : null}
                                                 </div>
                                             </div>
                                         </li>
@@ -332,9 +388,10 @@ export default function TimeOffPage() {
                                                 {p.employeeEmail ? <span className="text-slate-400 text-sm">({p.employeeEmail})</span> : null}
                                             </div>
                                             <div className="text-xs text-slate-400">
-                                                {p.date || '—'}
+                                                {p.submittedAt ? `Submitted: ${fmtTimeLocal(p.submittedAt)}` : ''}
                                             </div>
                                         </div>
+                                        <div className="text-xs text-slate-400">{p.date || '—'}</div>
                                         <div className="text-sm text-slate-200 mb-3">Reason: {p.reason || '—'}</div>
                                         <div className="flex gap-2">
                                             <button onClick={() => decide(p.id, 'APPROVED')} className="btn-primary">
