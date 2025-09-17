@@ -142,12 +142,12 @@ router.get('/callback', async (req: Request, res: Response) => {
         // Persist tokens using your exported helper
         await saveZohoTokens({
             zohoUserId,
-            access_token: accessToken,
-            refresh_token: refreshToken,
-            token_type: tokenType,
-            expires_in: expiresIn,
+            accessToken,
+            refreshToken,
+            tokenType,
+            expiresIn,
             scope,
-            received_at: new Date(),
+            receivedAt: new Date(),
         });
 
         // Success: land on the base app (NO query params)
