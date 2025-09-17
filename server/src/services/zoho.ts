@@ -292,10 +292,8 @@ export async function refreshExpiringTokens(windowMins: number = 60) {
     for (const row of rows) {
         try {
             await refreshWithRow(row);
-            // eslint-disable-next-line no-console
             console.log(`[zoho] refreshed token for user_id=${row.user_id} zoho_user_id=${row.zoho_user_id}`);
         } catch (e: any) {
-            // eslint-disable-next-line no-console
             console.error('[zoho] refresh failed', {
                 user_id: row.user_id,
                 zoho_user_id: row.zoho_user_id,
@@ -340,12 +338,10 @@ if (require.main === module) {
             await refreshExpiringTokens(mins);
             process.exit(0);
         } else {
-            // eslint-disable-next-line no-console
             console.log('[zoho] service module executed without --mode=cron; nothing to do.');
             process.exit(0);
         }
     })().catch(err => {
-        // eslint-disable-next-line no-console
         console.error('[zoho] fatal', err);
         process.exit(1);
     });
