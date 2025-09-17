@@ -1,170 +1,201 @@
+// server/src/routes/timeOff.ts
+
 import { Router, Request, Response } from 'express';
 import * as db from '../db';
 
-type AppUser = {
+const router = Router();
+
+/** tiny build marker so we can see the compiled file got deployed */
+(() => {
+    // eslint-disable-next-line no-console
+    console.log(
+        'TIMEOFF ROUTE BUILD TAG',
+        new Date().toISOString(),
+        __filename.replace(process.cwd(), ''),
+    );
+})();
+
+type ReqUser = {
     id: string;
     email?: string;
     fullName?: string;
     role?: string;
     managerUserId?: string | null;
 };
-type ReqWithUser = Request & { user?: AppUser };
 
-const router = Router();
+function getReqUser(req: Request): ReqUser | null {
+    const u = (req as any).user as ReqUser | undefined;
+    if (u && u.id) return u;
 
-// Build tag + quick route inspector
-console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
-
-router.get('/_routes', (_req, res) => {
-    type Layer = { route?: { path: string; methods: Record<string, boolean> } };
-    const stack: Layer[] = ((router as unknown as { stack?: Layer[] }).stack ?? []);
-    const list = stack
-        .filter(l => !!l.route)
-        .map(l => {
-            const method = l.route ? Object.keys(l.route.methods)[0] : 'get';
-            return `${method.toUpperCase()} ${l.route?.path}`;
-        });
-    res.json({ routes: list });
-});
-
-function getUser(req: ReqWithUser): AppUser {
-    if (req.user?.id) return req.user;
     const raw = req.header('x-dev-user');
-    if (raw) {
-        try {
-            const parsed = JSON.parse(raw);
-            if (parsed?.id) return parsed as AppUser;
-        } catch {
-            // ignore
-        }
-    }
-    throw new Error('Unauthenticated: missing user (set x-dev-user in dev)');
-}
-
-function toDateArray(dates: unknown): string[] {
-    if (!Array.isArray(dates)) return [];
-    return dates
-        .map(String)
-        .map(s => s.trim())
-        .filter(Boolean)
-        .map(s => (s.length > 10 ? s.slice(0, 10) : s)); // YYYY-MM-DD
-}
-
-function isoMidnight(dateYYYYMMDD: string): string {
-    return new Date(dateYYYYMMDD + 'T00:00:00Z').toISOString();
-}
-
-router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
-
-// ---- create handler (shared by two paths) ----
-async function createTimeOffRequest(req: ReqWithUser, res: Response) {
+    if (!raw) return null;
     try {
-        const user = getUser(req);
-        const body = (req.body || {}) as { dates?: unknown; reason?: string };
-        const dates = toDateArray(body.dates);
-        const reason = (body.reason || '').trim();
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.id) return parsed;
+    } catch {
+        /* ignore */
+    }
+    return null;
+}
 
-        if (!dates.length) return res.status(400).json({ ok: false, error: 'At least one date is required' });
-        if (!reason) return res.status(400).json({ ok: false, error: 'Reason is required' });
+function bad(res: Response, status: number, msg: string) {
+    return res.status(status).json({ ok: false, error: msg });
+}
 
-        const { rows } = await db.query(
-            `INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-             VALUES ($1, $2::date[], $3, 'PENDING', now())
-                 RETURNING id`,
-            [user.id, dates, reason]
-        );
+/* -------------------- health -------------------- */
+router.get('/_ping', (_req, res) => {
+    res.json({ ok: true, route: 'time-off' });
+});
 
+/* -------------------- create request -------------------- */
+
+async function createRequestHandler(req: Request, res: Response) {
+    const me = getReqUser(req);
+    if (!me?.id) return bad(res, 401, 'unauthorized');
+
+    const { dates, reason } = req.body ?? {};
+
+    if (!Array.isArray(dates) || dates.length === 0) {
+        return bad(res, 400, 'dates[] is required');
+    }
+
+    // Normalize to yyyy-mm-dd unique + sorted
+    const normalized = Array.from(
+        new Set(
+            dates
+                .map((d: any) => String(d || '').slice(0, 10))
+                .filter((s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)),
+        ),
+    ).sort();
+
+    if (normalized.length === 0) {
+        return bad(res, 400, 'no valid ISO dates provided');
+    }
+
+    try {
+        const q = `
+      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
+      VALUES ($1, $2::date[], $3, 'PENDING', now())
+      RETURNING id
+    `;
+        const { rows } = await db.query(q, [me.id, normalized, String(reason ?? '').trim()]);
         return res.json({ ok: true, id: rows[0]?.id });
-    } catch (err: any) {
-        console.error('create time-off failed', { error: err?.message || String(err) });
-        return res.status(400).json({ ok: false, error: err?.message || 'failed' });
+    } catch (e: any) {
+        return bad(res, 500, e?.message || 'create failed');
     }
 }
 
-// Both paths below are intentional so old/new UIs work
-router.post('/', createTimeOffRequest);            // NEW: POST /api/time-off
-router.post('/requests', createTimeOffRequest);    // OLD: POST /api/time-off/requests
+// Back-compat for old UI
+router.post('/requests', createRequestHandler);
+// Canonical path
+router.post('/', createRequestHandler);
 
-router.get('/pending', async (_req: ReqWithUser, res: Response) => {
+/* -------------------- list pending -------------------- */
+
+router.get('/pending', async (_req, res) => {
     try {
-        const { rows } = await db.query(
-            `SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-                    COALESCE(u.full_name,'') AS user_name,
-                    COALESCE(u.email,'')     AS user_email
-             FROM time_off_requests r
-                      LEFT JOIN users u ON u.id = r.user_id
-             WHERE r.status = 'PENDING'
-             ORDER BY r.created_at DESC`,
-            []
-        );
-        res.json(rows);
-    } catch (err: any) {
-        console.error('pending failed', err);
-        res.status(400).json({ ok: false, error: err?.message || 'failed' });
+        const q = `
+      SELECT
+        r.id,
+        r.user_id,
+        r.dates,
+        r.reason,
+        r.status,
+        r.created_at,
+        COALESCE(u.full_name, u.name, u.email) AS user_name,
+        u.email AS user_email
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE r.status = 'PENDING'
+      ORDER BY r.created_at DESC
+      LIMIT 200
+    `;
+        const { rows } = await db.query(q, []);
+        return res.json(rows);
+    } catch (e: any) {
+        return bad(res, 500, e?.message || 'query failed');
     }
 });
 
-router.patch('/:id', async (req: ReqWithUser, res: Response) => {
+/* -------------------- approve / reject -------------------- */
+
+router.patch('/:id', async (req, res) => {
+    const { id } = req.params;
+    const { decision, note } = req.body ?? {};
+    if (!/^[0-9a-f-]{36}$/i.test(String(id))) {
+        return bad(res, 400, 'invalid id');
+    }
+
+    const DECISIONS = new Set(['APPROVED', 'REJECTED']);
+    const next = String(decision || '').toUpperCase();
+    if (!DECISIONS.has(next)) {
+        return bad(res, 400, "decision must be 'APPROVED' or 'REJECTED'");
+    }
+
     try {
-        const { id } = req.params;
-        const { decision, note } = (req.body || {}) as { decision?: 'APPROVED'|'DECLINED'; note?: string };
+        const q = `
+      UPDATE time_off_requests
+         SET status = $2,
+             decision_note = COALESCE($3, decision_note),
+             decided_at = now()
+       WHERE id = $1
+       RETURNING id
+    `;
+        const { rows } = await db.query(q, [id, next, note ?? null]);
 
-        if (decision !== 'APPROVED' && decision !== 'DECLINED') {
-            return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DECLINED' });
-        }
+        // Use rows.length (not rowCount) to satisfy TS in CI
+        if (rows.length === 0) return bad(res, 404, 'not found');
 
-        const { rows } = await db.query(
-            `UPDATE time_off_requests
-             SET status = $2,
-                 decision_note = COALESCE($3, decision_note),
-                 decided_at = now()
-             WHERE id = $1
-                 RETURNING id`,
-            [id, decision, note ?? null]
-        );
-
-        if (!rows.length) return res.status(404).json({ ok: false, error: 'request not found' });
-        res.json({ ok: true });
-    } catch (err: any) {
-        console.error('decision failed', err);
-        res.status(400).json({ ok: false, error: err?.message || 'failed' });
+        return res.json({ ok: true });
+    } catch (e: any) {
+        return bad(res, 500, e?.message || 'update failed');
     }
 });
 
-router.get('/calendar', async (req: ReqWithUser, res: Response) => {
+/* -------------------- calendar view -------------------- */
+
+router.get('/calendar', async (req, res) => {
+    const from = String(req.query.from || '').slice(0, 10);
+    const to = String(req.query.to || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+        return bad(res, 400, 'from/to (yyyy-mm-dd) required');
+    }
+
     try {
-        getUser(req); // ensure auth
-
-        const from = String(req.query.from || '').slice(0, 10);
-        const to   = String(req.query.to   || '').slice(0, 10);
-        if (!from || !to) return res.status(400).json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
-
-        const { rows } = await db.query(
-            `SELECT r.id, r.user_id, COALESCE(u.full_name,'') AS name, r.status, r.reason, r.dates
-             FROM time_off_requests r
-                      LEFT JOIN users u ON u.id = r.user_id
-             WHERE array_length(r.dates,1) IS NOT NULL
-               AND EXISTS (
-                 SELECT 1 FROM unnest(r.dates) AS d(day)
-                 WHERE d.day BETWEEN $1::date AND $2::date
-             )
-             ORDER BY r.created_at DESC`,
-            [from, to]
-        );
+        const q = `
+      SELECT
+        r.id,
+        r.user_id,
+        COALESCE(u.full_name, u.name, u.email) AS name,
+        r.status,
+        r.reason,
+        r.dates
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE r.status IN ('PENDING','APPROVED') -- show both; UI marks pending
+        AND EXISTS (
+          SELECT 1
+          FROM unnest(r.dates) AS d
+          WHERE d BETWEEN $1::date AND $2::date
+        )
+      ORDER BY COALESCE(u.full_name, u.name, u.email), r.created_at DESC
+      LIMIT 1000
+    `;
+        const { rows } = await db.query(q, [from, to]);
 
         const entries = rows.map(r => ({
-            id: r.id as string,
-            userId: r.user_id as string,
-            name: (r.name as string) || '',
-            status: r.status as string,
-            reason: r.reason as string,
-            dates: Array.isArray(r.dates) ? (r.dates as string[]).map(d => isoMidnight(d)) : [],
+            id: r.id,
+            userId: r.user_id,
+            name: r.name,
+            status: r.status,
+            reason: r.reason,
+            // return as UTC midnight ISO strings to match existing client behavior
+            dates: (r.dates || []).map((d: string) => new Date(`${d}T00:00:00Z`).toISOString()),
         }));
 
-        res.json({ entries });
-    } catch (err: any) {
-        console.error('calendar failed error:', err);
-        res.status(400).json({ ok: false, error: err?.message || 'failed' });
+        return res.json({ entries });
+    } catch (e: any) {
+        return bad(res, 500, e?.message || 'calendar failed');
     }
 });
 
