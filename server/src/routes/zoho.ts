@@ -1,37 +1,36 @@
+// server/src/routes/zoho.ts
 import express, { Request, Response } from 'express';
 import {
     exchangeCodeForToken,
     saveZohoTokens,
-    // refreshAccessToken, // Uncomment + wire if you expose cron helpers below
 } from '../services/zoho';
 
 const router = express.Router();
 
 const {
-    // Where to land users after OAuth completes (no query params to prevent loops)
-    PUBLIC_APP_URL = 'https://timeoff.timesharehelpcenter.com',
+    // Land users on the time off page by default (you can override in env)
+    PUBLIC_APP_URL = 'https://timeoff.timesharehelpcenter.com/time-off',
 
-    // Zoho OAuth / API bases; customize for EU/IN/… as needed
-    ZOHO_ACCOUNTS_BASE = 'https://accounts.zoho.com', // e.g. https://accounts.zoho.eu
-    ZOHO_API_BASE = 'https://www.zohoapis.com',       // e.g. https://www.zohoapis.eu
+    // Zoho bases (change for EU/IN if needed)
+    ZOHO_ACCOUNTS_BASE = 'https://accounts.zoho.com',
+    ZOHO_API_BASE = 'https://www.zohoapis.com',
 
-    // OAuth app creds + redirect must match what you registered in Zoho
+    // OAuth app creds + redirect must match your Zoho client config
     ZOHO_CLIENT_ID = '',
     ZOHO_CLIENT_SECRET = '',
     ZOHO_REDIRECT_URI = '',
 
-    // Scopes must be enabled in your Zoho client config
+    // Scopes must be enabled in Zoho client
     ZOHO_SCOPES = 'ZohoCRM.modules.ALL ZohoCRM.settings.ALL AaaServer.profile.Read',
-
-    // CRON_SECRET = '', // For cron route if you enable it
 } = process.env;
 
-/** Utility: ensure we never create malformed redirects */
+/** Ensure we never create malformed redirects */
 function safeUrl(url: string): string {
     try {
         return new URL(url).toString();
     } catch {
-        return 'https://timeoff.timesharehelpcenter.com';
+        // Fallback to your app shell
+        return 'https://timeoff.timesharehelpcenter.com/time-off';
     }
 }
 
@@ -42,13 +41,13 @@ function buildZohoAuthorizeUrl(scopes: string): string {
     u.searchParams.set('client_id', ZOHO_CLIENT_ID!);
     u.searchParams.set('redirect_uri', ZOHO_REDIRECT_URI!);
     u.searchParams.set('scope', scopes.trim());
-    // Make sure we always get a refresh_token when needed:
+    // Ensure refresh_token issuance on re-consent
     u.searchParams.set('access_type', 'offline');
     u.searchParams.set('prompt', 'consent');
     return u.toString();
 }
 
-/** Exchange code for tokens using native fetch (fallback if service helper changes) */
+/** Fallback token exchange (only used if service helper isn’t available) */
 async function exchangeCodeWithFetch(code: string) {
     const tokenUrl = new URL('/oauth/v2/token', ZOHO_ACCOUNTS_BASE);
     const form = new URLSearchParams({
@@ -69,16 +68,17 @@ async function exchangeCodeWithFetch(code: string) {
         const txt = await resp.text();
         throw new Error(`Zoho token exchange failed: ${resp.status} ${txt}`);
     }
+
     return resp.json() as Promise<{
         access_token: string;
         refresh_token?: string;
-        token_type: string;
-        expires_in: number;
+        token_type?: string;
+        expires_in?: number;
         scope?: string;
     }>;
 }
 
-/** Get current Zoho userId using the CRM API */
+/** Resolve the current Zoho user id from the access token */
 async function getCurrentZohoUserId(accessToken: string): Promise<string> {
     const u = new URL('/crm/v2/users', ZOHO_API_BASE);
     u.searchParams.set('type', 'CurrentUser');
@@ -93,7 +93,6 @@ async function getCurrentZohoUserId(accessToken: string): Promise<string> {
     }
 
     const data = await resp.json();
-    // Expected shape: { users: [{ id: "1234567890", ... }] }
     const id = data?.users?.[0]?.id;
     if (!id) throw new Error('Could not resolve current Zoho user id');
     return String(id);
@@ -110,7 +109,7 @@ router.get('/start', (req: Request, res: Response) => {
     }
 });
 
-/** -------- 2) OAuth callback: exchange code -> tokens, upsert, redirect -------- */
+/** -------- 2) OAuth callback: exchange code -> tokens, save, redirect -------- */
 router.get('/callback', async (req: Request, res: Response) => {
     const { code, error } = req.query as { code?: string; error?: string };
 
@@ -124,83 +123,35 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     try {
-        // Prefer your service helper if present, else fallback to native fetch impl
+        // Prefer your service helper; fallback to native fetch if not available
         const tokens =
             typeof exchangeCodeForToken === 'function'
                 ? await exchangeCodeForToken(code)
                 : await exchangeCodeWithFetch(code);
 
+        // Map only what we need (and what SaveTokensInput accepts)
         const accessToken = (tokens as any).access_token ?? tokens.access_token;
         const refreshToken = (tokens as any).refresh_token ?? tokens.refresh_token;
-        const tokenType = (tokens as any).token_type ?? tokens.token_type;
-        const expiresIn = Number((tokens as any).expires_in ?? tokens.expires_in);
         const scope = (tokens as any).scope ?? ZOHO_SCOPES;
 
-        // Resolve current Zoho user id with the fresh access token
+        // Resolve current Zoho user id
         const zohoUserId = await getCurrentZohoUserId(accessToken);
 
-        // Persist tokens using your exported helper
+        // Persist tokens using only known keys
         await saveZohoTokens({
             zohoUserId,
             accessToken,
             refreshToken,
-            expiresIn,
             scope,
             receivedAt: new Date(),
         });
 
-        // Success: land on the base app (NO query params)
+        // Success: clean landing (NO query params to avoid loops)
         return res.redirect(303, safeUrl(PUBLIC_APP_URL));
     } catch (e: any) {
         console.error('[ZOHO][CALLBACK] Failed to handle callback:', e?.message || e);
         return res.redirect(303, safeUrl(PUBLIC_APP_URL) + '#zoho-auth-error');
     }
 });
-
-/** -------- 3) (Optional) Cron route — re-enable when helpers are available -------- */
-// If you later expose helpers like selectTokensExpiringWithin() and updateAccessTokenById(),
-// you can bring this back. For now it's commented to avoid build errors.
-/*
-router.get('/cron/refresh', async (req: Request, res: Response) => {
-  try {
-    const provided = String(req.query.secret || '');
-    if (!CRON_SECRET || provided !== CRON_SECRET) {
-      return res.status(403).json({ ok: false, error: 'Forbidden' });
-    }
-
-    const windowMins = Math.max(
-      5,
-      parseInt(String(req.query.windowMins || '60'), 10) || 60
-    );
-
-    const items = await selectTokensExpiringWithin(windowMins);
-    let refreshed = 0;
-    let errors = 0;
-
-    for (const row of items) {
-      try {
-        const next = await refreshAccessToken(row.refresh_token);
-        await updateAccessTokenById(row.id, next.access_token, next.expires_in);
-        refreshed++;
-      } catch (err) {
-        console.error('[ZOHO][CRON] Refresh failed for token id', row.id, err);
-        errors++;
-      }
-    }
-
-    return res.json({
-      ok: true,
-      windowMins,
-      checked: items.length,
-      refreshed,
-      errors,
-      items: items.map((i: any) => ({ id: i.id, zohoUserId: i.zoho_user_id })),
-    });
-  } catch (e: any) {
-    console.error('[ZOHO][CRON] Error:', e);
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  }
-});
-*/
 
 export default router;
