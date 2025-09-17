@@ -1,191 +1,248 @@
 // server/src/routes/timeOff.ts
-
-import { Router, Request, Response } from 'express';
+import express from 'express';
 import * as db from '../db';
 
-const router = Router();
+const router = express.Router();
 
-/** build marker so we can confirm the compiled file is new */
-(() => {
-    // eslint-disable-next-line no-console
-    console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
-})();
+// Tiny build tag so you can verify the compiled file being loaded
+// (you'll see this line echoed when you `require()` the route)
+console.log(
+    'TIMEOFF ROUTE BUILD TAG',
+    new Date().toISOString(),
+    __filename.replace(/\.ts$/, '.js').replace('/src/', '/dist/')
+);
 
-type ReqUser = {
-    id: string;
-    email?: string;
-    fullName?: string;
-    role?: string;
-    managerUserId?: string | null;
+// ---------- helpers ----------
+type AuthedReq = express.Request & {
+    user?: {
+        id: string;
+        email?: string;
+        fullName?: string;
+        role?: string; // 'Employee' | 'Manager' | 'Admin' | 'HR' | ...
+        managerUserId?: string | null;
+    };
 };
 
-function getReqUser(req: Request): ReqUser | null {
-    const u = (req as any).user as ReqUser | undefined;
-    if (u?.id) return u;
-
-    const raw = req.header('x-dev-user');
-    if (!raw) return null;
-    try {
-        const parsed = JSON.parse(raw);
-        if (parsed?.id) return parsed;
-    } catch {/* ignore */}
-    return null;
-}
-
-function bad(res: Response, status: number, msg: string) {
-    return res.status(status).json({ ok: false, error: msg });
-}
-
-/* -------------------- health -------------------- */
-router.get('/_ping', (_req, res) => {
-    res.json({ ok: true, route: 'time-off' });
-});
-
-/* -------------------- create request -------------------- */
-
-async function createRequestHandler(req: Request, res: Response) {
-    const me = getReqUser(req);
-    if (!me?.id) return bad(res, 401, 'unauthorized');
-
-    const { dates, reason } = req.body ?? {};
-
-    if (!Array.isArray(dates) || dates.length === 0) {
-        return bad(res, 400, 'dates[] is required');
-    }
-
-    // Normalize to yyyy-mm-dd unique + sorted
-    const normalized = Array.from(
-        new Set(
-            dates
-                .map((d: any) => String(d || '').slice(0, 10))
-                .filter((s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)),
-        ),
-    ).sort();
-
-    if (normalized.length === 0) {
-        return bad(res, 400, 'no valid ISO dates provided');
-    }
-
-    try {
-        const q = `
-            INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-            VALUES ($1, $2::date[], $3, 'PENDING', now())
-                RETURNING id
-        `;
-        const { rows } = await db.query(q, [me.id, normalized, String(reason ?? '').trim()]);
-        return res.json({ ok: true, id: rows[0]?.id });
-    } catch (e: any) {
-        return bad(res, 500, e?.message || 'create failed');
-    }
-}
-
-// Legacy alias kept for older UI
-router.post('/requests', createRequestHandler);
-// Canonical path
-router.post('/', createRequestHandler);
-
-/* -------------------- list pending -------------------- */
-
-router.get('/pending', async (_req, res) => {
-    try {
-        const q = `
-            SELECT
-                r.id,
-                r.user_id,
-                r.dates,
-                r.reason,
-                r.status,
-                r.created_at,
-                COALESCE(u.full_name, u.name, u.email) AS user_name,
-                u.email AS user_email
-            FROM time_off_requests r
-                     LEFT JOIN users u ON u.id = r.user_id
-            WHERE r.status = 'PENDING'
-            ORDER BY r.created_at DESC
-                LIMIT 200
-        `;
-        const { rows } = await db.query(q, []);
-        return res.json(rows);
-    } catch (e: any) {
-        return bad(res, 500, e?.message || 'query failed');
-    }
-});
-
-/* -------------------- approve / reject -------------------- */
-
-router.patch('/:id', async (req, res) => {
-    const { id } = req.params;
-    const { decision, note } = req.body ?? {};
-    if (!/^[0-9a-f-]{36}$/i.test(String(id))) {
-        return bad(res, 400, 'invalid id');
-    }
-
-    const DECISIONS = new Set(['APPROVED', 'REJECTED']);
-    const next = String(decision || '').toUpperCase();
-    if (!DECISIONS.has(next)) {
-        return bad(res, 400, "decision must be 'APPROVED' or 'REJECTED'");
-    }
-
-    try {
-        const q = `
-            UPDATE time_off_requests
-            SET status = $2,
-                decision_note = COALESCE($3, decision_note),
-                decided_at = now()
-            WHERE id = $1
-                RETURNING id
-        `;
-        const { rows } = await db.query(q, [id, next, note ?? null]);
-        if (rows.length === 0) return bad(res, 404, 'not found');
-        return res.json({ ok: true });
-    } catch (e: any) {
-        return bad(res, 500, e?.message || 'update failed');
-    }
-});
-
-/* -------------------- calendar view -------------------- */
-
-router.get('/calendar', async (req, res) => {
+function getFromTo(req: express.Request) {
     const from = String(req.query.from || '').slice(0, 10);
     const to = String(req.query.to || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
-        return bad(res, 400, 'from/to (yyyy-mm-dd) required');
+        throw Object.assign(new Error('from/to must be YYYY-MM-DD'), { status: 400 });
+    }
+    return { from, to };
+}
+
+function ensureAuthed(req: AuthedReq, res: express.Response, next: express.NextFunction) {
+    if (!req.user?.id) return res.status(401).json({ ok: false, error: 'unauthorized' });
+    next();
+}
+
+function ensureManager(req: AuthedReq, res: express.Response, next: express.NextFunction) {
+    const role = req.user?.role;
+    if (!role || !['Manager', 'Admin', 'HR'].includes(role)) {
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    next();
+}
+
+function toISODateStrings(dates: Date[] | string[]) {
+    return (dates || []).map(d => new Date(d as any).toISOString());
+}
+
+// ---------- routes ----------
+
+// Simple health check for this router
+router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
+
+/**
+ * Create a time-off request for the current user
+ * Body: { dates: string[] (YYYY-MM-DD), reason?: string }
+ */
+async function createRequestHandler(req: AuthedReq, res: express.Response) {
+    if (!req.user?.id) return res.status(401).json({ ok: false, error: 'unauthorized' });
+
+    let dates: string[] = [];
+    const reason = (req.body?.reason ?? '').toString().slice(0, 500);
+
+    try {
+        if (Array.isArray(req.body?.dates)) {
+            dates = req.body.dates.map((s: any) => String(s).slice(0, 10));
+        }
+        if (!dates.length || !dates.every(s => /^\d{4}-\d{2}-\d{2}$/.test(s))) {
+            return res.status(400).json({ ok: false, error: 'dates must be an array of YYYY-MM-DD' });
+        }
+
+        const { rows } = await db.query(
+            `
+      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
+      VALUES ($1, $2::date[], NULLIF($3,'') , 'PENDING', now())
+      RETURNING id
+      `,
+            [req.user.id, dates, reason]
+        );
+
+        return res.json({ ok: true, id: rows[0].id });
+    } catch (e: any) {
+        return res.status(500).json({ ok: false, error: e?.message || 'failed to create request' });
+    }
+}
+
+// Primary submit endpoint used by the UI
+router.post('/', ensureAuthed, createRequestHandler);
+
+// Back-compat alias some clients used: POST /api/time-off/requests
+router.post('/requests', ensureAuthed, createRequestHandler);
+
+/**
+ * Pending requests (manager-only)
+ * Returns most recent first with requester info
+ */
+router.get('/pending', ensureAuthed, ensureManager, async (_req: AuthedReq, res) => {
+    try {
+        const { rows } = await db.query(
+            `
+      SELECT
+        r.id,
+        r.user_id        AS user_id,
+        r.dates          AS dates,
+        r.reason         AS reason,
+        r.status         AS status,
+        r.created_at     AS created_at,
+        u.full_name      AS user_name,
+        u.email          AS user_email
+      FROM time_off_requests r
+      JOIN users u ON u.id = r.user_id
+      WHERE r.status = 'PENDING'
+      ORDER BY r.created_at DESC
+      `
+        );
+
+        // normalize date output to ISO strings
+        const out = rows.map(r => ({
+            ...r,
+            dates: toISODateStrings(r.dates),
+        }));
+
+        res.json(out);
+    } catch (e: any) {
+        res.status(500).json({ ok: false, error: e?.message || 'failed to load pending' });
+    }
+});
+
+/**
+ * Approve / Deny a request (manager-only)
+ * Body: { decision: 'APPROVED' | 'DENIED', note?: string }
+ */
+router.patch('/:id', ensureAuthed, ensureManager, async (req: AuthedReq, res) => {
+    const id = String(req.params.id || '');
+    const decision = String(req.body?.decision || '').toUpperCase();
+    const note = (req.body?.note ?? '').toString().slice(0, 500);
+
+    if (!/^[0-9a-f\-]{36}$/i.test(id)) {
+        return res.status(400).json({ ok: false, error: 'invalid id' });
+    }
+    if (!['APPROVED', 'DENIED'].includes(decision)) {
+        return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DENIED' });
     }
 
     try {
-        const q = `
-            SELECT
-                r.id,
-                r.user_id,
-                COALESCE(u.full_name, u.name, u.email) AS name,
-                r.status,
-                r.reason,
-                r.dates
-            FROM time_off_requests r
-                     LEFT JOIN users u ON u.id = r.user_id
-            WHERE r.status IN ('PENDING','APPROVED')
-              AND EXISTS (
-                SELECT 1
-                FROM unnest(r.dates) AS d
-                WHERE d BETWEEN $1::date AND $2::date
-            )
-            ORDER BY COALESCE(u.full_name, u.name, u.email), r.created_at DESC
-                LIMIT 1000
-        `;
-        const { rows } = await db.query(q, [from, to]);
+        const result = await db.query(
+            `
+      UPDATE time_off_requests
+      SET status = $2,
+          decision_note = NULLIF($3,''),
+          decided_at = now()
+      WHERE id = $1
+      `,
+            [id, decision, note]
+        );
 
-        const entries = rows.map(r => ({
-            id: r.id,
-            userId: r.user_id,
-            name: r.name,
-            status: r.status,
-            reason: r.reason,
-            dates: (r.dates || []).map((d: string) => new Date(`${d}T00:00:00Z`).toISOString()),
-        }));
+        // pg compatible across codebases (some adapters return {rowCount}, some don't)
+        const updated = (result as any).rowCount ?? (Array.isArray((result as any).rows) ? (result as any).rows.length : 0);
+        if (!updated) return res.status(404).json({ ok: false, error: 'not found' });
 
-        return res.json({ entries });
+        res.json({ ok: true });
     } catch (e: any) {
-        return bad(res, 500, e?.message || 'calendar failed');
+        res.status(500).json({ ok: false, error: e?.message || 'failed to update' });
+    }
+});
+
+/**
+ * Employee calendar: only this user's requests within [from,to]
+ * Query: from=YYYY-MM-DD&to=YYYY-MM-DD
+ */
+router.get('/calendar', ensureAuthed, async (req: AuthedReq, res) => {
+    try {
+        const { from, to } = getFromTo(req);
+
+        const { rows } = await db.query(
+            `
+      SELECT
+        r.id,
+        r.user_id        AS "userId",
+        u.full_name      AS "name",
+        u.email          AS "email",
+        r.status,
+        r.reason,
+        r.created_at     AS "created_at",
+        ARRAY(
+          SELECT (d)::timestamptz FROM unnest(r.dates) AS d
+        )                AS "dates"
+      FROM time_off_requests r
+      JOIN users u ON u.id = r.user_id
+      WHERE r.dates && daterange($1::date, $2::date, '[]')
+        AND r.status IN ('PENDING','APPROVED')
+        AND r.user_id = $3
+      ORDER BY r.created_at DESC
+      `,
+            [from, to, req.user!.id]
+        );
+
+        res.json({
+            entries: rows.map(r => ({ ...r, dates: toISODateStrings(r.dates) })),
+        });
+    } catch (e: any) {
+        const status = (e && (e as any).status) || 500;
+        res.status(status).json({ ok: false, error: e?.message || 'calendar failed' });
+    }
+});
+
+/**
+ * Manager calendar: ALL users’ requests within [from,to]
+ * Query: from=YYYY-MM-DD&to=YYYY-MM-DD
+ */
+router.get('/manager/calendar', ensureAuthed, ensureManager, async (req: AuthedReq, res) => {
+    try {
+        const { from, to } = getFromTo(req);
+
+        const { rows } = await db.query(
+            `
+      SELECT
+        r.id,
+        r.user_id        AS "userId",
+        u.full_name      AS "name",
+        u.email          AS "email",
+        r.status,
+        r.reason,
+        r.created_at     AS "created_at",
+        ARRAY(
+          SELECT (d)::timestamptz FROM unnest(r.dates) AS d
+        )                AS "dates"
+      FROM time_off_requests r
+      JOIN users u ON u.id = r.user_id
+      WHERE r.dates && daterange($1::date, $2::date, '[]')
+        AND r.status IN ('PENDING','APPROVED')
+      ORDER BY r.created_at DESC, u.full_name ASC
+      `,
+            [from, to]
+        );
+
+        res.json({
+            entries: rows.map(r => ({ ...r, dates: toISODateStrings(r.dates) })),
+        });
+    } catch (e: any) {
+        const status = (e && (e as any).status) || 500;
+        res.status(status).json({ ok: false, error: e?.message || 'manager calendar failed' });
     }
 });
 
