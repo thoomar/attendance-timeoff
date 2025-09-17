@@ -1,275 +1,338 @@
 // server/src/routes/timeOff.ts
-import { Router, Request, Response } from 'express';
-import * as db from '../db';
-import { ensureAuthed, ensureManager } from '../auth';
-import { sendTimeOffEmail } from '../services/timeoffEmail';
+import express, { Request, Response, NextFunction, RequestHandler } from 'express';
+import { z } from 'zod';
+import { requireAuth } from '../auth';
+import { db } from '../db';
+import { sendEmail } from '../services/email';
 
-type AuthedReq = Request & {
-    user?: {
-        id: string;
-        email: string;
-        fullName: string;
-        role: 'Employee' | 'Manager' | string;
-    };
+const router = express.Router();
+
+/* ===========================
+   Auth helpers
+   =========================== */
+
+const requireManagerOrAdmin: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
+    const role = (req as any)?.user?.role as string | undefined;
+    if (role === 'Manager' || role === 'Admin') return next();
+    return res.status(403).json({ ok: false, error: 'Managers or Admins only.' });
 };
 
-const router = Router();
+/* ===========================
+   Config
+   =========================== */
 
-// Helpful tag so you can see rebuilds in pm2 logs
-console.log(
-    'TIMEOFF ROUTE BUILD TAG',
-    new Date().toISOString(),
-    __filename.replace(process.cwd(), ''),
-);
+const RAW_APPROVER_EMAILS =
+    (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter((s: string) => Boolean(s));
 
-// ---- utils --------------------------------------------------------------
+/**
+ * Final approver list (deduped). You mentioned:
+ * sam@, zaid@, freddie@, donald@
+ * Put them in APPPROVER_EMAILS env (comma-separated) in prod/CI.
+ */
+const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
 
-function toISODateStrings(dates: (string | Date)[]): string[] {
-    // Ensure consistent ISO strings for the client
-    return (dates || []).map((d) => new Date(d).toISOString());
-}
+/**
+ * HR alias to notify on each new submission.
+ * Default to your alias if env not set.
+ */
+const HR_ALIAS = process.env.HR_ALIAS ?? 'hr@republicfinancialservices.com';
 
-function parseBodyDates(body: any): string[] {
-    const raw = Array.isArray(body?.dates) ? body.dates : [];
-    // normalize yyyy-mm-dd only
-    return raw
-        .map((s) => String(s).trim())
-        .filter(Boolean)
-        .map((s) => s.substring(0, 10));
-}
+/**
+ * Optional default manager_user_id column value if your schema requires it.
+ * Otherwise leave null and the INSERT will pass null.
+ */
+const DEFAULT_MANAGER_USER_ID = process.env.DEFAULT_MANAGER_USER_ID || null;
 
-function isManager(req: AuthedReq) {
-    return (req.user?.role || '').toLowerCase().includes('manager');
-}
+/* ===========================
+   Schemas
+   =========================== */
 
-// ---- health -------------------------------------------------------------
-
-router.get('/_ping', (_req, res) => {
-    res.json({ ok: true, route: 'time-off' });
+const CreateReq = z.object({
+    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1), // 'YYYY-MM-DD'
+    reason: z.string().min(3)
 });
 
-// ---- create request -----------------------------------------------------
-// POST /api/time-off               (kept for back-compat)
-// POST /api/time-off/requests      (new alias, used by the new UI)
-router.post('/', ensureAuthed, async (req: AuthedReq, res: Response) => {
-    await createRequestHandler(req, res);
-});
-router.post('/requests', ensureAuthed, async (req: AuthedReq, res: Response) => {
-    await createRequestHandler(req, res);
+const DecisionReq = z.object({
+    decision: z.enum(['APPROVED', 'REJECTED']),
+    // Optional note to the employee (not persisted here unless you add a column)
+    note: z.string().max(2000).optional()
 });
 
-async function createRequestHandler(req: AuthedReq, res: Response) {
+/* ===========================
+   Email helpers
+   =========================== */
+
+function htmlEscape(s: string): string {
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function renderSubmittedEmail(user: { fullName?: string | null; email?: string | null }, dates: string[], reason: string): string {
+    const name = user.fullName || user.email || 'An employee';
+    const datesList = dates.map(d => `<li>${htmlEscape(d)}</li>`).join('');
+    return `
+    <div>
+      <p><strong>${htmlEscape(name)}</strong> has submitted a time off request for:</p>
+      <ul>${datesList}</ul>
+      <p><strong>Reason:</strong> ${htmlEscape(reason)}</p>
+    </div>
+  `;
+}
+
+function renderApproverEmail(user: { fullName?: string | null; email?: string | null }, dates: string[], reason: string): string {
+    const name = user.fullName || user.email || 'Employee';
+    const datesStr = dates.join(', ');
+    return `
+    <div>
+      <p>New time off request submitted.</p>
+      <p><strong>Employee:</strong> ${htmlEscape(name)}</p>
+      <p><strong>Dates:</strong> ${htmlEscape(datesStr)}</p>
+      <p><strong>Reason:</strong> ${htmlEscape(reason)}</p>
+      <p>Please review in the Time Off dashboard.</p>
+    </div>
+  `;
+}
+
+function renderDecisionEmail(
+    user: { fullName?: string | null; email?: string | null },
+    decision: 'APPROVED' | 'REJECTED',
+    date: string,
+    note?: string
+): string {
+    const status = decision === 'APPROVED' ? 'approved' : 'rejected';
+    const noteHtml = note ? `<p><strong>Note from manager:</strong> ${htmlEscape(note)}</p>` : '';
+    return `
+    <div>
+      <p>Your time off request for <strong>${htmlEscape(date)}</strong> was <strong>${status.toUpperCase()}</strong>.</p>
+      ${noteHtml}
+    </div>
+  `;
+}
+
+/* ===========================
+   Routes
+   =========================== */
+
+/**
+ * Create a time off request (one row per date)
+ * - Notifies HR alias
+ * - Notifies approvers list
+ */
+router.post('/time-off/request', requireAuth, async (req: Request, res: Response) => {
+    const parse = CreateReq.safeParse(req.body);
+    if (!parse.success) {
+        return res.status(400).json({ ok: false, error: parse.error.flatten() });
+    }
+
+    const { dates, reason } = parse.data;
+    const authed = (req as any).user as {
+        id: string;
+        email?: string | null;
+        fullName?: string | null;
+        role?: string;
+    };
+
     try {
-        const user = req.user!;
-        const dates = parseBodyDates(req.body);
-        const reason = String(req.body?.reason || '').trim();
-
-        if (!dates.length) {
-            return res.status(400).json({ ok: false, error: 'dates required' });
+        // Insert one row per date
+        const insertedRows: Array<{ id: string; date: string }> = [];
+        for (const day of dates) {
+            const q = `
+        INSERT INTO time_off_requests (employee_user_id, date, reason, status, manager_user_id)
+        VALUES ($1, $2::date, $3, 'PENDING', $4)
+        RETURNING id, date::text
+      `;
+            const params = [authed.id, day, reason, DEFAULT_MANAGER_USER_ID];
+            const { rows } = await db.query<{ id: string; date: string }>(q, params);
+            if (rows?.[0]) insertedRows.push(rows[0]);
         }
 
-        // Sort date strings (YYYY-MM-DD) before insert for consistency
-        dates.sort();
+        // Send HR notification (single email covering all dates)
+        const hrHtml = renderSubmittedEmail(authed, dates, reason);
+        await sendEmail({
+            to: [HR_ALIAS],
+            subject: `${authed.fullName || authed.email || 'Employee'} submitted time off (${dates.join(', ')})`,
+            html: hrHtml
+        });
 
-        const { rows } = await db.query(
-            `
-      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-      VALUES ($1, $2::date[], $3, 'PENDING', now())
-      RETURNING id, user_id, dates, reason, status, created_at
-      `,
-            [user.id, dates, reason],
-        );
-        const row = rows[0];
-
-        // Fire NEW_REQUEST email to approvers/HR
-        try {
-            await sendTimeOffEmail('NEW_REQUEST', {
-                siteUrl: process.env.SITE_URL || '',
-                employeeName: user.fullName,
-                employeeEmail: user.email,
-                reason,
-                dates, // YYYY-MM-DD[]
+        // Send approver notifications (one email to the group)
+        if (approverEmails.length > 0) {
+            const approverHtml = renderApproverEmail(authed, dates, reason);
+            await sendEmail({
+                to: approverEmails,
+                subject: `Time off request: ${authed.fullName || authed.email || 'Employee'} (${dates.join(', ')})`,
+                html: approverHtml
             });
-        } catch (e: any) {
-            console.warn('[email] NEW_REQUEST failed:', e?.message || String(e));
         }
 
-        res.json({ ok: true, id: row.id });
+        return res.json({
+            ok: true,
+            created: insertedRows
+        });
     } catch (e: any) {
-        const status = (e && (e as any).status) || 500;
-        res.status(status).json({ ok: false, error: e?.message || 'create failed' });
-    }
-}
-
-// ---- pending list for managers -----------------------------------------
-
-router.get('/pending', ensureAuthed, ensureManager, async (_req: AuthedReq, res: Response) => {
-    try {
-        const { rows } = await db.query(
-            `
-                SELECT
-                    r.id,
-                    r.user_id,
-                    r.dates,
-                    r.reason,
-                    r.status,
-                    r.created_at,
-                    u.full_name AS user_name,
-                    u.email     AS user_email
-                FROM time_off_requests r
-                         JOIN users u ON u.id = r.user_id
-                WHERE r.status = 'PENDING'
-                ORDER BY r.created_at DESC
-            `,
-            [],
-        );
-        res.json(
-            rows.map((r: any) => ({
-                id: r.id,
-                user_id: r.user_id,
-                dates: toISODateStrings(r.dates),
-                reason: r.reason,
-                status: r.status,
-                created_at: r.created_at,
-                user_name: r.user_name,
-                user_email: r.user_email,
-            })),
-        );
-    } catch (e: any) {
-        const status = (e && (e as any).status) || 500;
-        res.status(status).json({ ok: false, error: e?.message || 'pending failed' });
+        console.error('Create time off error:', e);
+        return res.status(500).json({ ok: false, error: e.message || String(e) });
     }
 });
 
-// ---- approve / reject ---------------------------------------------------
-// PATCH /api/time-off/:id  { decision: "APPROVED" | "REJECTED", note?: string }
-router.patch('/:id', ensureAuthed, ensureManager, async (req: AuthedReq, res: Response) => {
+/**
+ * Get my requests (all statuses)
+ */
+router.get('/time-off/mine', requireAuth, async (req: Request, res: Response) => {
+    const authed = (req as any).user as { id: string };
     try {
-        const id = String(req.params.id);
-        const decisionRaw = String(req.body?.decision || '').toUpperCase();
-        const note = String(req.body?.note || '').trim();
+        const q = `
+      SELECT id, employee_user_id, date::text AS date, reason, status, created_at
+      FROM time_off_requests
+      WHERE employee_user_id = $1
+      ORDER BY date ASC, created_at ASC
+    `;
+        const { rows } = await db.query(q, [authed.id]);
+        return res.json({ ok: true, items: rows ?? [] });
+    } catch (e: any) {
+        console.error('Mine error:', e);
+        return res.status(500).json({ ok: false, error: e.message || String(e) });
+    }
+});
 
-        if (!['APPROVED', 'REJECTED'].includes(decisionRaw)) {
-            return res.status(400).json({ ok: false, error: 'decision must be APPROVED or REJECTED' });
-        }
+/**
+ * Pending requests (manager/admin)
+ * Returns a flat list of pending items with basic employee info if available.
+ */
+router.get('/time-off/pending', requireAuth, requireManagerOrAdmin, async (_req: Request, res: Response) => {
+    try {
+        const q = `
+      SELECT
+        r.id,
+        r.employee_user_id,
+        COALESCE(u.full_name, u.email) AS employee_label,
+        r.date::text AS date,
+        r.reason,
+        r.status,
+        r.created_at
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.employee_user_id
+      WHERE r.status = 'PENDING'
+      ORDER BY r.date ASC, r.created_at ASC
+    `;
+        const { rows } = await db.query(q);
+        return res.json({ ok: true, items: rows ?? [] });
+    } catch (e: any) {
+        console.error('Pending error:', e);
+        return res.status(500).json({ ok: false, error: e.message || String(e) });
+    }
+});
 
-        const { rows } = await db.query(
-            `
+/**
+ * Approve/Reject a single request row by id
+ */
+router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async (req: Request, res: Response) => {
+    const parse = DecisionReq.safeParse(req.body);
+    if (!parse.success) {
+        return res.status(400).json({ ok: false, error: parse.error.flatten() });
+    }
+    const { decision, note } = parse.data;
+
+    const id = req.params.id;
+    if (!id) {
+        return res.status(400).json({ ok: false, error: 'Missing id param' });
+    }
+
+    try {
+        // Update the request
+        const upQ = `
       UPDATE time_off_requests
-      SET status = $2,
-          decision_note = $3,
-          decided_at = now()
-      WHERE id = $1
-      RETURNING id, user_id, dates, status
-      `,
-            [id, decisionRaw, note],
-        );
+      SET status = $1
+      WHERE id = $2
+      RETURNING id, employee_user_id, date::text AS date, reason, status
+    `;
+        const { rows } = await db.query<{
+            id: string;
+            employee_user_id: string;
+            date: string;
+            reason: string;
+            status: 'APPROVED' | 'REJECTED' | 'PENDING';
+        }>(upQ, [decision, id]);
 
-        if (!rows.length) {
-            return res.status(404).json({ ok: false, error: 'request not found' });
+        const updated = rows?.[0];
+        if (!updated) {
+            return res.status(404).json({ ok: false, error: 'Request not found' });
         }
 
-        // Email the employee with the decision
-        const reqRow = rows[0];
-        const { rows: urows } = await db.query(
-            `SELECT full_name, email FROM users WHERE id = $1 LIMIT 1`,
-            [reqRow.user_id],
-        );
-        if (urows.length) {
-            const emp = urows[0];
-            try {
-                await sendTimeOffEmail(decisionRaw as any, {
-                    siteUrl: process.env.SITE_URL || '',
-                    employeeName: emp.full_name,
-                    employeeEmail: emp.email,
-                    // pick first date for subject/body (template supports single date)
-                    date: String(reqRow.dates?.[0] || '').substring(0, 10),
-                    decision: decisionRaw as 'APPROVED' | 'REJECTED',
-                    reason: note,
-                });
-            } catch (e: any) {
-                console.warn('[email] decision email failed:', e?.message || String(e));
-            }
+        // Get employee email/name to notify
+        const uQ = `SELECT full_name, email FROM users WHERE id = $1`;
+        const uRes = await db.query<{ full_name: string | null; email: string | null }>(uQ, [updated.employee_user_id]);
+        const user = uRes.rows?.[0] ?? { full_name: null, email: null };
+
+        const targetEmail = user.email;
+        if (targetEmail) {
+            const html = renderDecisionEmail({ fullName: user.full_name, email: user.email }, decision, updated.date, note);
+            await sendEmail({
+                to: [targetEmail],
+                subject: `Your time off request for ${updated.date} was ${decision}`,
+                html
+            });
         }
 
-        res.json({ ok: true });
+        return res.json({ ok: true, item: updated });
     } catch (e: any) {
-        const status = (e && (e as any).status) || 500;
-        res.status(status).json({ ok: false, error: e?.message || 'patch failed' });
+        console.error('Decision error:', e);
+        return res.status(500).json({ ok: false, error: e.message || String(e) });
     }
 });
 
-// ---- employee calendar (self) -------------------------------------------
-// GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
-router.get('/calendar', ensureAuthed, async (req: AuthedReq, res: Response) => {
+/**
+ * Calendar view (approved + pending) in a date window.
+ * Query params: from=YYYY-MM-DD, to=YYYY-MM-DD
+ */
+router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
+    const from = String(req.query.from ?? '').trim();
+    const to = String(req.query.to ?? '').trim();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+        return res.status(400).json({ ok: false, error: 'from/to must be YYYY-MM-DD' });
+    }
+
     try {
-        const from = String(req.query.from || '').substring(0, 10);
-        const to = String(req.query.to || '').substring(0, 10);
-
-        const { rows } = await db.query(
-            `
+        const q = `
       SELECT
-        r.id,
-        r.user_id           AS "userId",
-        u.full_name         AS "name",
-        u.email             AS "email",
-        r.status,
-        r.reason,
-        r.created_at        AS "created_at",
-        ARRAY(SELECT (d)::timestamptz FROM unnest(r.dates) AS d) AS "dates"
+        r.employee_user_id,
+        COALESCE(u.full_name, u.email, r.employee_user_id::text) AS user_name,
+        json_agg(json_build_object(
+          'date', r.date::text,
+          'status', r.status,
+          'reason', r.reason,
+          'id', r.id
+        ) ORDER BY r.date ASC) AS days
       FROM time_off_requests r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.user_id = $3
-        AND r.dates && daterange($1::date, $2::date, '[]')
-        AND r.status IN ('PENDING', 'APPROVED')
-      ORDER BY r.created_at DESC
-      `,
-            [from, to, req.user!.id],
-        );
+      LEFT JOIN users u ON u.id = r.employee_user_id
+      WHERE r.date >= $1::date
+        AND r.date <= $2::date
+      GROUP BY r.employee_user_id, u.full_name, u.email
+      ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
+    `;
+        const { rows } = await db.query(q, [from, to]);
 
-        res.json({
-            entries: rows.map((r: any) => ({ ...r, dates: toISODateStrings(r.dates) })),
-        });
+        // Normalize for client
+        const entries = (rows ?? []).map((row: any) => ({
+            userId: row.employee_user_id,
+            userName: row.user_name,
+            dates: (row.days as Array<{ date: string }>).map((d) => d.date),
+            statusByDate: row.days as Array<{ date: string; status: string; reason: string; id: string }>
+        }));
+
+        return res.json({ ok: true, entries });
     } catch (e: any) {
-        const status = (e && (e as any).status) || 500;
-        res.status(status).json({ ok: false, error: e?.message || 'calendar failed' });
+        console.error('Calendar error:', e);
+        return res.status(500).json({ ok: false, error: e.message || String(e) });
     }
 });
 
-// ---- manager calendar (all) ---------------------------------------------
-// GET /api/time-off/manager/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
-router.get('/manager/calendar', ensureAuthed, ensureManager, async (req: AuthedReq, res: Response) => {
-    try {
-        const from = String(req.query.from || '').substring(0, 10);
-        const to = String(req.query.to || '').substring(0, 10);
-
-        const { rows } = await db.query(
-            `
-      SELECT
-        r.id,
-        r.user_id                 AS "userId",
-        u.full_name               AS "name",
-        u.email                   AS "email",
-        r.status,
-        r.reason,
-        r.created_at              AS "created_at",
-        ARRAY(SELECT (d)::timestamptz FROM unnest(r.dates) AS d) AS "dates"
-      FROM time_off_requests r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.dates && daterange($1::date, $2::date, '[]')
-        AND r.status IN ('PENDING','APPROVED')
-      ORDER BY r.created_at DESC, u.full_name ASC
-      `,
-            [from, to],
-        );
-
-        res.json({
-            entries: rows.map((r: any) => ({ ...r, dates: toISODateStrings(r.dates) })),
-        });
-    } catch (e: any) {
-        const status = (e && (e as any).status) || 500;
-        res.status(status).json({ ok: false, error: e?.message || 'manager calendar failed' });
-    }
-});
-
+/* ===========================
+   Export
+   =========================== */
 export default router;
