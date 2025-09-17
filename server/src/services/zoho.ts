@@ -3,9 +3,9 @@
 /**
  * Zoho OAuth service:
  * - Build consent URL
- * - Exchange/refresh tokens
+ * - Exchange / refresh tokens
  * - Persist tokens with robust ON CONFLICT by constraint name
- * - Simple cron flow when run with: node dist/services/zoho.js --mode=cron --windowMins=60
+ * - Cron helper: `node dist/services/zoho.js --mode=cron --windowMins=60`
  */
 
 import { URLSearchParams } from 'url';
@@ -20,25 +20,22 @@ const {
     ZOHO_API_BASE,      // e.g. "https://www.zohoapis.com" | "https://www.zohoapis.eu"
 } = process.env;
 
+/** Scopes your app requires (space-delimited). Keep in sync with your Zoho console. */
+const DEFAULT_SCOPE = process.env.ZOHO_SCOPE || 'ZohoCRM.users.READ';
+
 function accountsBase() {
-    return (ZOHO_ACCOUNTS_BASE || 'https://accounts.zoho.com').replace(/\/+$/,'');
+    return (ZOHO_ACCOUNTS_BASE || 'https://accounts.zoho.com').replace(/\/+$/, '');
 }
 function apiBase(fallbackFromToken?: string | null) {
     const fb = (fallbackFromToken && fallbackFromToken.trim()) || ZOHO_API_BASE || 'https://www.zohoapis.com';
-    return fb.replace(/\/+$/,'');
+    return fb.replace(/\/+$/, '');
 }
-
-/** Scopes your app requires (space-delimited). Keep in sync with your Zoho console. */
-const DEFAULT_SCOPE =
-    process.env.ZOHO_SCOPE ||
-    'ZohoCRM.users.READ';
-
 function nowPlusSeconds(seconds: number) {
     const s = Math.max(0, seconds);
     return new Date(Date.now() + s * 1000);
 }
 
-/** ---------- Public API used by routes ---------- */
+/* ===================== Public API used by routes ===================== */
 
 export function buildAuthUrl(state?: string) {
     const qp = new URLSearchParams({
@@ -54,11 +51,12 @@ export function buildAuthUrl(state?: string) {
 }
 
 export async function handleCallback(appUserId: string, code: string) {
-    // Exchange code -> tokens
+    // Exchange auth code -> tokens
     const tokenRes = await exchangeCode(code);
+
     // Fetch Zoho user info to determine stable zoho_user_id
     const who = await fetchZohoUserInfo(tokenRes.access_token, tokenRes.api_domain);
-    const zohoUserId = String(who?.ZUID ?? who?.user_id ?? who?.id ?? '');
+    const zohoUserId = String((who && (who.ZUID ?? who.user_id ?? who.id)) || '');
 
     if (!zohoUserId) {
         throw new Error('Zoho user id not found from /oauth/user/info');
@@ -77,22 +75,22 @@ export async function getStatus(appUserId?: string) {
     if (appUserId) {
         const { rows } = await db.query(
             `
-      SELECT id, user_id, zoho_user_id, revoked, expires_at, scope, api_domain, token_type, updated_at
-      FROM zoho_tokens
-      WHERE revoked IS NOT TRUE AND user_id = $1
-      ORDER BY updated_at DESC
-      LIMIT 1
-      `,
+                SELECT id, user_id, zoho_user_id, revoked, expires_at, scope, api_domain, token_type, updated_at
+                FROM zoho_tokens
+                WHERE revoked IS NOT TRUE AND user_id = $1
+                ORDER BY updated_at DESC
+                    LIMIT 1
+            `,
             [appUserId],
         );
         return rows[0] || null;
     }
     const { rows } = await db.query(
         `
-    SELECT count(*)::int AS active_count
-    FROM zoho_tokens
-    WHERE revoked IS NOT TRUE AND expires_at > now()
-    `,
+            SELECT count(*)::int AS active_count
+            FROM zoho_tokens
+            WHERE revoked IS NOT TRUE AND expires_at > now()
+        `,
         [],
     );
     return rows[0] || { active_count: 0 };
@@ -115,9 +113,9 @@ export async function getAccessTokenForUser(appUserId: string) {
     return row.access_token as string;
 }
 
-/** ---------- Token Exchange / Refresh ---------- */
+/* ===================== Token Exchange / Refresh ===================== */
 
-type TokenResponse = {
+export type TokenResponse = {
     access_token: string;
     refresh_token?: string;
     token_type?: string;
@@ -182,7 +180,7 @@ async function fetchZohoUserInfo(access_token: string, apiDomainFromToken?: stri
     return await res.json();
 }
 
-/** ---------- Persistence ---------- */
+/* ===================== Persistence ===================== */
 
 async function upsertTokens(args: {
     appUserId: string;
@@ -205,25 +203,25 @@ async function upsertTokens(args: {
     // Refresh 60s early
     const expires_at = nowPlusSeconds(Math.max(0, expiresInSec - 60));
 
-    // Use the *constraint name* to avoid "no unique or exclusion constraint" errors
+    // Use the *constraint name* so we never hit "no unique or exclusion constraint" when zoho_user_id is unique
     await db.query(
         `
-    INSERT INTO zoho_tokens (
-      user_id, access_token, refresh_token, expires_at,
-      zoho_user_id, scope, api_domain, token_type, revoked, created_at, updated_at
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false, now(), now())
-    ON CONFLICT ON CONSTRAINT zoho_tokens_zoho_user_id_key
-    DO UPDATE SET
-      access_token = EXCLUDED.access_token,
-      refresh_token = EXCLUDED.refresh_token,
-      expires_at    = EXCLUDED.expires_at,
-      scope         = COALESCE(NULLIF(EXCLUDED.scope, ''), zoho_tokens.scope),
-      api_domain    = COALESCE(EXCLUDED.api_domain, zoho_tokens.api_domain),
-      token_type    = COALESCE(EXCLUDED.token_type, zoho_tokens.token_type),
-      revoked       = false,
-      updated_at    = now()
-    `,
+            INSERT INTO zoho_tokens (
+                user_id, access_token, refresh_token, expires_at,
+                zoho_user_id, scope, api_domain, token_type, revoked, created_at, updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false, now(), now())
+                ON CONFLICT ON CONSTRAINT zoho_tokens_zoho_user_id_key
+                DO UPDATE SET
+                access_token = EXCLUDED.access_token,
+                       refresh_token = EXCLUDED.refresh_token,
+                       expires_at    = EXCLUDED.expires_at,
+                       scope         = COALESCE(NULLIF(EXCLUDED.scope, ''), NULLIF(zoho_tokens.scope, ''), ''),
+                       api_domain    = COALESCE(EXCLUDED.api_domain, zoho_tokens.api_domain),
+                       token_type    = COALESCE(EXCLUDED.token_type, zoho_tokens.token_type),
+                       revoked       = false,
+                       updated_at    = now()
+        `,
         [
             appUserId,
             access_token,
@@ -240,12 +238,12 @@ async function upsertTokens(args: {
 async function getRefreshTokenFallback(zohoUserId: string): Promise<string | null> {
     const { rows } = await db.query(
         `
-    SELECT refresh_token
-    FROM zoho_tokens
-    WHERE zoho_user_id = $1
-    ORDER BY updated_at DESC
-    LIMIT 1
-    `,
+            SELECT refresh_token
+            FROM zoho_tokens
+            WHERE zoho_user_id = $1
+            ORDER BY updated_at DESC
+                LIMIT 1
+        `,
         [zohoUserId],
     );
     return rows[0]?.refresh_token ?? null;
@@ -254,12 +252,12 @@ async function getRefreshTokenFallback(zohoUserId: string): Promise<string | nul
 async function getActiveRow(appUserId: string) {
     const { rows } = await db.query(
         `
-    SELECT *
-    FROM zoho_tokens
-    WHERE revoked IS NOT TRUE AND user_id = $1
-    ORDER BY updated_at DESC
-    LIMIT 1
-    `,
+            SELECT *
+            FROM zoho_tokens
+            WHERE revoked IS NOT TRUE AND user_id = $1
+            ORDER BY updated_at DESC
+                LIMIT 1
+        `,
         [appUserId],
     );
     return rows[0];
@@ -276,18 +274,18 @@ async function refreshWithRow(row: any): Promise<TokenResponse> {
     return token;
 }
 
-/** ---------- Cron (used by pm2 process "zoho-refresh-cron") ---------- */
+/* ===================== Cron (used by pm2 process "zoho-refresh-cron") ===================== */
 
 export async function refreshExpiringTokens(windowMins: number = 60) {
     // Find tokens expiring within the next window and refresh them
     const { rows } = await db.query(
         `
-    SELECT *
-    FROM zoho_tokens
-    WHERE revoked IS NOT TRUE
-      AND expires_at <= NOW() + (($1::text || ' minutes')::interval)
-    ORDER BY expires_at ASC
-    `,
+            SELECT *
+            FROM zoho_tokens
+            WHERE revoked IS NOT TRUE
+              AND expires_at <= NOW() + (($1::text || ' minutes')::interval)
+            ORDER BY expires_at ASC
+        `,
         [String(windowMins)],
     );
 
@@ -307,14 +305,33 @@ export async function refreshExpiringTokens(windowMins: number = 60) {
     }
 }
 
-/** ---------- CLI Entrypoint ---------- */
+/* ===================== Back-compat exports for older routes/zoho.ts ===================== */
+
+export async function exchangeCodeForToken(code: string): Promise<TokenResponse> {
+    // old name expected by some routes
+    return exchangeCode(code);
+}
+
+// old names some codebases use; safe aliases
+export const getAuthUrl = buildAuthUrl;
+export const getZohoStatus = getStatus;
+
+export async function upsertZohoTokens(
+    userId: string,
+    zohoUserId: string,
+    token: TokenResponse,
+) {
+    return upsertTokens({ appUserId: userId, zohoUserId, token });
+}
+
+/* ===================== CLI Entrypoint ===================== */
 
 if (require.main === module) {
     (async () => {
         const argv = new Map<string, string>();
         for (let i = 2; i < process.argv.length; i++) {
             const [k, v] = process.argv[i].split('=');
-            if (k) argv.set(k.replace(/^--/,'').toLowerCase(), v ?? 'true');
+            if (k) argv.set(k.replace(/^--/, '').toLowerCase(), v ?? 'true');
         }
 
         const mode = argv.get('mode');
