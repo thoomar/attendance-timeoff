@@ -1,4 +1,4 @@
-// server/src/routes/timeOff.ts
+// /opt/attendance-timeoff/server/src/routes/timeOff.ts
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import * as db from '../db';
@@ -7,46 +7,32 @@ import { sendEmail } from '../services/email';
 
 const router = express.Router();
 
-// Build tag so we can verify the compiled file is the one running
-// You should see this line in PM2 logs on boot.
 console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
 
-/** -------- Env / Config -------- */
+/** Env */
 const RAW_APPROVER_EMAILS =
     (process.env.APPROVER_EMAILS ?? process.env.HR_EMAILS ?? '')
         .split(',')
         .map(s => s.trim())
         .filter(Boolean);
+const approverEmails = Array.from(new Set(RAW_APPROVER_EMAILS));
 
-const approverEmails: string[] = Array.from(new Set(RAW_APPROVER_EMAILS));
-
-/** -------- Schemas -------- */
+/** Schemas */
 const CreateReq = z.object({
-    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1), // 'YYYY-MM-DD'
+    dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
     reason: z.string().min(3),
 });
-
 const DecisionReq = z.object({
     decision: z.enum(['APPROVED', 'DENIED']),
     note: z.string().optional(),
 });
+const asDate = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
-/** Utilities */
-function asDate(s: string) {
-    // Normalize to UTC-midnight; stored column is DATE[] (no TZ) but casting is fine
-    return new Date(`${s}T00:00:00.000Z`);
-}
+/** Health */
+router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
 
-/** -------- Health -------- */
-router.get('/_ping', (_req: Request, res: Response) => {
-    res.json({ ok: true, route: 'time-off' });
-});
-
-/** -------- Routes -------- */
-
-// Create a request
-// FINAL PATH: POST /api/time-off
-router.post('/', requireAuth, async (req: Request, res: Response) => {
+/** Create (POST /api/time-off) */
+router.post('/', requireAuth, async (req, res) => {
     try {
         const user = (req as any).user;
         const body = CreateReq.parse(req.body);
@@ -60,28 +46,24 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       `,
             [user.id, dates, body.reason],
         );
-
         const id = rows[0]?.id as string;
 
-        // Notify approvers/HR (best-effort)
         const subject = `${user.fullName || user.email} submitted a time off request`;
         const summaryDates = body.dates.join(', ');
         const text =
             `${user.fullName || user.email} has submitted a time off request for ${summaryDates}\n` +
             `Reason: ${body.reason}`;
         const to = ['hr@republicfinancialservices.com', ...approverEmails];
-
         await sendEmail({ to, subject, text }).catch(() => null);
 
-        return res.json({ ok: true, id });
+        res.json({ ok: true, id });
     } catch (e: any) {
-        return res.status(400).json({ ok: false, error: e?.message || 'create failed' });
+        res.status(400).json({ ok: false, error: e?.message || 'create failed' });
     }
 });
 
-// Pending list for approvers
-// FINAL PATH: GET /api/time-off/pending
-router.get('/pending', requireAuth, async (_req: Request, res: Response) => {
+/** Pending (GET /api/time-off/pending) */
+router.get('/pending', requireAuth, async (_req, res) => {
     try {
         const { rows } = await db.query(
             `
@@ -94,19 +76,17 @@ router.get('/pending', requireAuth, async (_req: Request, res: Response) => {
       `,
             [],
         );
-        return res.json(rows);
+        res.json(rows);
     } catch (e: any) {
-        return res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
+        res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
     }
 });
 
-// Approve / Deny a request
-// FINAL PATH: PATCH /api/time-off/:id
-router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
+/** Decision (PATCH /api/time-off/:id) */
+router.patch('/:id', requireAuth, async (req, res) => {
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
-
         const { rows } = await db.query(
             `
       UPDATE time_off_requests
@@ -119,19 +99,15 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
       `,
             [id, body.decision, body.note ?? null],
         );
-
-        if (rows.length === 0) {
-            return res.status(404).json({ ok: false, error: 'not found' });
-        }
-        return res.json({ ok: true });
+        if (rows.length === 0) return res.status(404).json({ ok: false, error: 'not found' });
+        res.json({ ok: true });
     } catch (e: any) {
-        return res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
+        res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
     }
 });
 
-// Calendar (range)
-// FINAL PATH: GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
-router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
+/** Calendar (GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD) */
+router.get('/calendar', requireAuth, async (req, res) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
         const to = (req.query.to as string) || new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
@@ -166,11 +142,10 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
             reason: r.reason,
             dates: r.dates,
         }));
-
-        return res.json({ entries });
+        res.json({ entries });
     } catch (e: any) {
         console.error('calendar failed', e);
-        return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
+        res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
 });
 
