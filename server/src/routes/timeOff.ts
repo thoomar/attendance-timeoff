@@ -5,9 +5,11 @@ import * as db from '../db';
 import { requireAuth } from '../auth';
 import { sendEmail } from '../services/email';
 
-console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
-
 const router = express.Router();
+
+// Build tag so we can verify the compiled file is the one running
+// You should see this line in PM2 logs on boot.
+console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
 
 /** -------- Env / Config -------- */
 const RAW_APPROVER_EMAILS =
@@ -31,32 +33,37 @@ const DecisionReq = z.object({
 
 /** Utilities */
 function asDate(s: string) {
-    // Store as UTC date; Postgres DATE has no TZ, but normalize input
+    // Normalize to UTC-midnight; stored column is DATE[] (no TZ) but casting is fine
     return new Date(`${s}T00:00:00.000Z`);
 }
 
+/** -------- Health -------- */
+router.get('/_ping', (_req: Request, res: Response) => {
+    res.json({ ok: true, route: 'time-off' });
+});
+
 /** -------- Routes -------- */
 
-/**
- * POST /api/time-off
- * Create a time-off request
- */
+// Create a request
+// FINAL PATH: POST /api/time-off
 router.post('/', requireAuth, async (req: Request, res: Response) => {
     try {
         const user = (req as any).user;
         const body = CreateReq.parse(req.body);
         const dates = body.dates.map(asDate);
 
-        const insertSql = `
-            INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
-            VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
-                RETURNING id
-        `;
+        const { rows } = await db.query(
+            `
+      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
+      VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
+      RETURNING id
+      `,
+            [user.id, dates, body.reason],
+        );
 
-        const { rows } = await db.query(insertSql, [user.id, dates, body.reason]);
         const id = rows[0]?.id as string;
 
-        // Notify approvers/HR
+        // Notify approvers/HR (best-effort)
         const subject = `${user.fullName || user.email} submitted a time off request`;
         const summaryDates = body.dates.join(', ');
         const text =
@@ -72,46 +79,46 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
     }
 });
 
-/**
- * GET /api/time-off/pending
- * List pending requests (for approvers)
- */
+// Pending list for approvers
+// FINAL PATH: GET /api/time-off/pending
 router.get('/pending', requireAuth, async (_req: Request, res: Response) => {
     try {
-        const pendingSql = `
-            SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-                   u.full_name AS user_name, u.email AS user_email
-            FROM time_off_requests r
-                     LEFT JOIN users u ON u.id = r.user_id
-            WHERE r.status = 'PENDING'
-            ORDER BY r.created_at DESC
-        `;
-        const { rows } = await db.query(pendingSql, []);
+        const { rows } = await db.query(
+            `
+      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+             u.full_name AS user_name, u.email AS user_email
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE r.status = 'PENDING'
+      ORDER BY r.created_at DESC
+      `,
+            [],
+        );
         return res.json(rows);
     } catch (e: any) {
         return res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
     }
 });
 
-/**
- * PATCH /api/time-off/:id
- * Approve / Deny a request
- */
+// Approve / Deny a request
+// FINAL PATH: PATCH /api/time-off/:id
 router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
 
-        const updateSql = `
-            UPDATE time_off_requests
-            SET status = $2,
-                decision_note = $3,
-                decided_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $1
-                RETURNING id
-        `;
-        const { rows } = await db.query(updateSql, [id, body.decision, body.note ?? null]);
+        const { rows } = await db.query(
+            `
+      UPDATE time_off_requests
+      SET status = $2,
+          decision_note = $3,
+          decided_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+      `,
+            [id, body.decision, body.note ?? null],
+        );
 
         if (rows.length === 0) {
             return res.status(404).json({ ok: false, error: 'not found' });
@@ -122,38 +129,34 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
     }
 });
 
-/**
- * GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
- * Range calendar view using DATE[] (no employee_user_id anywhere)
- */
+// Calendar (range)
+// FINAL PATH: GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
 router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
         const to = (req.query.to as string) || new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
 
-        const sql = `
-            SELECT
-                r.id,
-                r.user_id,
-                u.full_name AS user_name,
-                u.email     AS user_email,
-                r.dates,
-                r.status,
-                r.reason
-            FROM time_off_requests r
-                     LEFT JOIN users u ON u.id = r.user_id
-            WHERE EXISTS (
-                SELECT 1
-                FROM unnest(r.dates) AS d(actual)
-                WHERE d.actual BETWEEN $1::date AND $2::date
-            )
-            ORDER BY r.user_id, r.id DESC
-        `;
-
-        console.log('TIMEOFF SQL about to run', { from, to });
-        console.log('TIMEOFF SQL:\n' + sql);
-
-        const { rows } = await db.query(sql, [from, to]);
+        const { rows } = await db.query(
+            `
+      SELECT
+        r.id,
+        r.user_id,
+        u.full_name AS user_name,
+        u.email     AS user_email,
+        r.dates,
+        r.status,
+        r.reason
+      FROM time_off_requests r
+      LEFT JOIN users u ON u.id = r.user_id
+      WHERE EXISTS (
+        SELECT 1
+        FROM unnest(r.dates) AS d(actual)
+        WHERE d.actual BETWEEN $1::date AND $2::date
+      )
+      ORDER BY r.user_id, r.id DESC
+      `,
+            [from, to],
+        );
 
         const entries = rows.map((r: any) => ({
             id: r.id,
@@ -166,12 +169,9 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
 
         return res.json({ entries });
     } catch (e: any) {
-        console.error('TIMEOFF ROUTE calendar failed', e);
+        console.error('calendar failed', e);
         return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
 });
-
-/** Optional: quick ping to verify mount */
-router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
 
 export default router;
