@@ -2,7 +2,7 @@
 import express, { Request, Response, NextFunction, RequestHandler } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth';
-import db from '../db'; // ✅ FIX: default import instead of `{ db }`
+import * as db from '../db'; // ✅ works whether db.ts exports { query } or others (use (db as any).query)
 import { sendEmail } from '../services/email';
 
 const router = express.Router();
@@ -50,10 +50,7 @@ const DecisionReq = z.object({
    =========================== */
 
 function htmlEscape(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function renderSubmittedEmail(user: { fullName?: string | null; email?: string | null }, dates: string[], reason: string): string {
@@ -131,8 +128,9 @@ router.post('/time-off/request', requireAuth, async (req: Request, res: Response
                     RETURNING id, date::text
             `;
             const params = [authed.id, day, reason, DEFAULT_MANAGER_USER_ID];
-            const { rows } = await (db as any).query<{ id: string; date: string }>(q, params);
-            if (rows?.[0]) insertedRows.push(rows[0]);
+            const resQ = await (db as any).query(q, params);
+            const row = resQ?.rows?.[0] as { id: string; date: string } | undefined;
+            if (row) insertedRows.push(row);
         }
 
         // Send HR notification (single email covering all dates)
@@ -153,10 +151,7 @@ router.post('/time-off/request', requireAuth, async (req: Request, res: Response
             });
         }
 
-        return res.json({
-            ok: true,
-            created: insertedRows
-        });
+        return res.json({ ok: true, created: insertedRows });
     } catch (e: any) {
         console.error('Create time off error:', e);
         return res.status(500).json({ ok: false, error: e.message || String(e) });
@@ -175,8 +170,8 @@ router.get('/time-off/mine', requireAuth, async (req: Request, res: Response) =>
             WHERE employee_user_id = $1
             ORDER BY date ASC, created_at ASC
         `;
-        const { rows } = await (db as any).query(q, [authed.id]);
-        return res.json({ ok: true, items: rows ?? [] });
+        const resQ = await (db as any).query(q, [authed.id]);
+        return res.json({ ok: true, items: resQ?.rows ?? [] });
     } catch (e: any) {
         console.error('Mine error:', e);
         return res.status(500).json({ ok: false, error: e.message || String(e) });
@@ -202,8 +197,8 @@ router.get('/time-off/pending', requireAuth, requireManagerOrAdmin, async (_req:
             WHERE r.status = 'PENDING'
             ORDER BY r.date ASC, r.created_at ASC
         `;
-        const { rows } = await (db as any).query(q);
-        return res.json({ ok: true, items: rows ?? [] });
+        const resQ = await (db as any).query(q);
+        return res.json({ ok: true, items: resQ?.rows ?? [] });
     } catch (e: any) {
         console.error('Pending error:', e);
         return res.status(500).json({ ok: false, error: e.message || String(e) });
@@ -221,9 +216,7 @@ router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async 
     const { decision, note } = parse.data;
 
     const id = req.params.id;
-    if (!id) {
-        return res.status(400).json({ ok: false, error: 'Missing id param' });
-    }
+    if (!id) return res.status(400).json({ ok: false, error: 'Missing id param' });
 
     try {
         const upQ = `
@@ -232,23 +225,18 @@ router.post('/time-off/:id/decision', requireAuth, requireManagerOrAdmin, async 
             WHERE id = $2
                 RETURNING id, employee_user_id, date::text AS date, reason, status
         `;
-        const { rows } = await (db as any).query<{
-            id: string;
-            employee_user_id: string;
-            date: string;
-            reason: string;
-            status: 'APPROVED' | 'REJECTED' | 'PENDING';
-        }>(upQ, [decision, id]);
+        const upRes = await (db as any).query(upQ, [decision, id]);
+        const updated = upRes?.rows?.[0] as
+            | { id: string; employee_user_id: string; date: string; reason: string; status: 'APPROVED' | 'REJECTED' | 'PENDING' }
+            | undefined;
 
-        const updated = rows?.[0];
-        if (!updated) {
-            return res.status(404).json({ ok: false, error: 'Request not found' });
-        }
+        if (!updated) return res.status(404).json({ ok: false, error: 'Request not found' });
 
         // Get employee email/name to notify
         const uQ = `SELECT full_name, email FROM users WHERE id = $1`;
-        const uRes = await (db as any).query<{ full_name: string | null; email: string | null }>(uQ, [updated.employee_user_id]);
-        const user = uRes.rows?.[0] ?? { full_name: null, email: null };
+        const uRes = await (db as any).query(uQ, [updated.employee_user_id]);
+        const user = (uRes?.rows?.[0] ??
+            { full_name: null, email: null }) as { full_name: string | null; email: string | null };
 
         const targetEmail = user.email;
         if (targetEmail) {
@@ -297,9 +285,9 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
             GROUP BY r.employee_user_id, u.full_name, u.email
             ORDER BY COALESCE(u.full_name, u.email, r.employee_user_id::text)
         `;
-        const { rows } = await (db as any).query(q, [from, to]);
+        const resQ = await (db as any).query(q, [from, to]);
 
-        const entries = (rows ?? []).map((row: any) => ({
+        const entries = (resQ?.rows ?? []).map((row: any) => ({
             userId: row.employee_user_id,
             userName: row.user_name,
             dates: (row.days as Array<{ date: string }>).map((d) => d.date),
