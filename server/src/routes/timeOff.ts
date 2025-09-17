@@ -31,29 +31,32 @@ const DecisionReq = z.object({
 
 /** Utilities */
 function asDate(s: string) {
-    // store as UTC date in DATE[]; Postgres DATE has no TZ, but we normalize input
+    // Store as UTC date; Postgres DATE has no TZ, but normalize input
     return new Date(`${s}T00:00:00.000Z`);
 }
 
 /** -------- Routes -------- */
 
-// Create a request
-router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
+/**
+ * POST /api/time-off
+ * Create a time-off request
+ */
+router.post('/', requireAuth, async (req: Request, res: Response) => {
     try {
         const user = (req as any).user;
         const body = CreateReq.parse(req.body);
         const dates = body.dates.map(asDate);
 
         const insertSql = `
-      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
-      VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
-      RETURNING id
-    `;
+            INSERT INTO time_off_requests (user_id, dates, reason, status, created_at, updated_at)
+            VALUES ($1, $2::date[], $3, 'PENDING', now(), now())
+                RETURNING id
+        `;
 
         const { rows } = await db.query(insertSql, [user.id, dates, body.reason]);
         const id = rows[0]?.id as string;
 
-        // notify HR alias + approvers
+        // Notify approvers/HR
         const subject = `${user.fullName || user.email} submitted a time off request`;
         const summaryDates = body.dates.join(', ');
         const text =
@@ -69,17 +72,20 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
     }
 });
 
-// Pending list for approvers
-router.get('/time-off/pending', requireAuth, async (_req: Request, res: Response) => {
+/**
+ * GET /api/time-off/pending
+ * List pending requests (for approvers)
+ */
+router.get('/pending', requireAuth, async (_req: Request, res: Response) => {
     try {
         const pendingSql = `
-      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-             u.full_name AS user_name, u.email AS user_email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.status = 'PENDING'
-      ORDER BY r.created_at DESC
-    `;
+            SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+                   u.full_name AS user_name, u.email AS user_email
+            FROM time_off_requests r
+                     LEFT JOIN users u ON u.id = r.user_id
+            WHERE r.status = 'PENDING'
+            ORDER BY r.created_at DESC
+        `;
         const { rows } = await db.query(pendingSql, []);
         return res.json(rows);
     } catch (e: any) {
@@ -87,21 +93,24 @@ router.get('/time-off/pending', requireAuth, async (_req: Request, res: Response
     }
 });
 
-// Approve / Deny
-router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) => {
+/**
+ * PATCH /api/time-off/:id
+ * Approve / Deny a request
+ */
+router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
 
         const updateSql = `
-      UPDATE time_off_requests
-      SET status = $2,
-          decision_note = $3,
-          decided_at = NOW(),
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING id
-    `;
+            UPDATE time_off_requests
+            SET status = $2,
+                decision_note = $3,
+                decided_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+                RETURNING id
+        `;
         const { rows } = await db.query(updateSql, [id, body.decision, body.note ?? null]);
 
         if (rows.length === 0) {
@@ -113,30 +122,33 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
     }
 });
 
-// Calendar (range) — DATE[] query with explicit SQL logging
-router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response) => {
+/**
+ * GET /api/time-off/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * Range calendar view using DATE[] (no employee_user_id anywhere)
+ */
+router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
         const to = (req.query.to as string) || new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
 
         const sql = `
-      SELECT
-        r.id,
-        r.user_id,
-        u.full_name AS user_name,
-        u.email     AS user_email,
-        r.dates,
-        r.status,
-        r.reason
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE EXISTS (
-        SELECT 1
-        FROM unnest(r.dates) AS d(actual)
-        WHERE d.actual BETWEEN $1::date AND $2::date
-      )
-      ORDER BY r.user_id, r.id DESC
-    `;
+            SELECT
+                r.id,
+                r.user_id,
+                u.full_name AS user_name,
+                u.email     AS user_email,
+                r.dates,
+                r.status,
+                r.reason
+            FROM time_off_requests r
+                     LEFT JOIN users u ON u.id = r.user_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM unnest(r.dates) AS d(actual)
+                WHERE d.actual BETWEEN $1::date AND $2::date
+            )
+            ORDER BY r.user_id, r.id DESC
+        `;
 
         console.log('TIMEOFF SQL about to run', { from, to });
         console.log('TIMEOFF SQL:\n' + sql);
@@ -158,5 +170,8 @@ router.get('/time-off/calendar', requireAuth, async (req: Request, res: Response
         return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
 });
+
+/** Optional: quick ping to verify mount */
+router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
 
 export default router;
