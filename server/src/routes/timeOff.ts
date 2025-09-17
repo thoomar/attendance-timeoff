@@ -1,36 +1,25 @@
-// server/src/routes/timeOff.ts
 import express from 'express';
 import * as db from '../db';
+import { sendTimeOffEmail } from '../services/timeoffEmail';
 
 const router = express.Router();
 
-// Tiny build tag so you can verify the compiled file being loaded
-// (you'll see this line echoed when you `require()` the route)
 console.log(
     'TIMEOFF ROUTE BUILD TAG',
     new Date().toISOString(),
     __filename.replace(/\.ts$/, '.js').replace('/src/', '/dist/')
 );
 
-// ---------- helpers ----------
+// ---------- types / helpers ----------
 type AuthedReq = express.Request & {
     user?: {
         id: string;
         email?: string;
         fullName?: string;
-        role?: string; // 'Employee' | 'Manager' | 'Admin' | 'HR' | ...
+        role?: string;            // 'Employee' | 'Manager' | 'Admin' | 'HR' | ...
         managerUserId?: string | null;
     };
 };
-
-function getFromTo(req: express.Request) {
-    const from = String(req.query.from || '').slice(0, 10);
-    const to = String(req.query.to || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
-        throw Object.assign(new Error('from/to must be YYYY-MM-DD'), { status: 400 });
-    }
-    return { from, to };
-}
 
 function ensureAuthed(req: AuthedReq, res: express.Response, next: express.NextFunction) {
     if (!req.user?.id) return res.status(401).json({ ok: false, error: 'unauthorized' });
@@ -45,19 +34,27 @@ function ensureManager(req: AuthedReq, res: express.Response, next: express.Next
     next();
 }
 
+function getFromTo(req: express.Request) {
+    const from = String(req.query.from || '').slice(0, 10);
+    const to = String(req.query.to || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+        const err: any = new Error('from/to must be YYYY-MM-DD');
+        err.status = 400;
+        throw err;
+    }
+    return { from, to };
+}
+
 function toISODateStrings(dates: Date[] | string[]) {
     return (dates || []).map(d => new Date(d as any).toISOString());
 }
 
-// ---------- routes ----------
+const SITE_URL = process.env.SITE_URL || process.env.PUBLIC_SITE_URL || '';
 
-// Simple health check for this router
+// ---------- routes ----------
 router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
 
-/**
- * Create a time-off request for the current user
- * Body: { dates: string[] (YYYY-MM-DD), reason?: string }
- */
+// Create handler shared by both POST endpoints
 async function createRequestHandler(req: AuthedReq, res: express.Response) {
     if (!req.user?.id) return res.status(401).json({ ok: false, error: 'unauthorized' });
 
@@ -74,65 +71,71 @@ async function createRequestHandler(req: AuthedReq, res: express.Response) {
 
         const { rows } = await db.query(
             `
-      INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-      VALUES ($1, $2::date[], NULLIF($3,'') , 'PENDING', now())
-      RETURNING id
-      `,
+                INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
+                VALUES ($1, $2::date[], NULLIF($3,'') , 'PENDING', now())
+                    RETURNING id, created_at
+            `,
             [req.user.id, dates, reason]
         );
 
-        return res.json({ ok: true, id: rows[0].id });
+        const id = rows[0].id as string;
+        const createdAt = rows[0].created_at as Date;
+
+        // fire-and-forget NEW_REQUEST email to approvers/HR using your existing service
+        Promise.resolve(
+            sendTimeOffEmail('NEW_REQUEST', {
+                siteUrl: SITE_URL,
+                employeeName: req.user.fullName || req.user.email || 'Employee',
+                employeeEmail: req.user.email || '',
+                reason,
+                dates, // array of 'YYYY-MM-DD'
+            })
+        ).catch(() => {});
+
+        return res.json({ ok: true, id, created_at: createdAt });
     } catch (e: any) {
         return res.status(500).json({ ok: false, error: e?.message || 'failed to create request' });
     }
 }
 
-// Primary submit endpoint used by the UI
+// Primary create endpoint the UI already uses:
 router.post('/', ensureAuthed, createRequestHandler);
-
-// Back-compat alias some clients used: POST /api/time-off/requests
+// Back-compat alias requested:
 router.post('/requests', ensureAuthed, createRequestHandler);
 
-/**
- * Pending requests (manager-only)
- * Returns most recent first with requester info
- */
+// Manager: list pending
 router.get('/pending', ensureAuthed, ensureManager, async (_req: AuthedReq, res) => {
     try {
         const { rows } = await db.query(
             `
-      SELECT
-        r.id,
-        r.user_id        AS user_id,
-        r.dates          AS dates,
-        r.reason         AS reason,
-        r.status         AS status,
-        r.created_at     AS created_at,
-        u.full_name      AS user_name,
-        u.email          AS user_email
-      FROM time_off_requests r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.status = 'PENDING'
-      ORDER BY r.created_at DESC
-      `
+                SELECT
+                    r.id,
+                    r.user_id        AS user_id,
+                    r.dates          AS dates,
+                    r.reason         AS reason,
+                    r.status         AS status,
+                    r.created_at     AS created_at,
+                    u.full_name      AS user_name,
+                    u.email          AS user_email
+                FROM time_off_requests r
+                         JOIN users u ON u.id = r.user_id
+                WHERE r.status = 'PENDING'
+                ORDER BY r.created_at DESC
+            `
         );
 
-        // normalize date output to ISO strings
-        const out = rows.map(r => ({
-            ...r,
-            dates: toISODateStrings(r.dates),
-        }));
-
-        res.json(out);
+        res.json(
+            rows.map(r => ({
+                ...r,
+                dates: toISODateStrings(r.dates),
+            }))
+        );
     } catch (e: any) {
         res.status(500).json({ ok: false, error: e?.message || 'failed to load pending' });
     }
 });
 
-/**
- * Approve / Deny a request (manager-only)
- * Body: { decision: 'APPROVED' | 'DENIED', note?: string }
- */
+// Manager: approve/deny
 router.patch('/:id', ensureAuthed, ensureManager, async (req: AuthedReq, res) => {
     const id = String(req.params.id || '');
     const decision = String(req.body?.decision || '').toUpperCase();
@@ -141,25 +144,52 @@ router.patch('/:id', ensureAuthed, ensureManager, async (req: AuthedReq, res) =>
     if (!/^[0-9a-f\-]{36}$/i.test(id)) {
         return res.status(400).json({ ok: false, error: 'invalid id' });
     }
-    if (!['APPROVED', 'DENIED'].includes(decision)) {
-        return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DENIED' });
+    if (!['APPROVED', 'DENIED', 'REJECTED'].includes(decision)) {
+        return res.status(400).json({ ok: false, error: 'decision must be APPROVED or DENIED/REJECTED' });
     }
 
     try {
-        const result = await db.query(
+        // Use RETURNING so we know if anything was updated and grab data for email in one go.
+        const { rows } = await db.query(
             `
-      UPDATE time_off_requests
+      UPDATE time_off_requests r
       SET status = $2,
           decision_note = NULLIF($3,''),
           decided_at = now()
-      WHERE id = $1
+      WHERE r.id = $1
+      RETURNING
+        r.id,
+        r.reason,
+        r.dates,
+        r.created_at,
+        r.decided_at,
+        (SELECT u.full_name FROM users u WHERE u.id = r.user_id) AS user_name,
+        (SELECT u.email     FROM users u WHERE u.id = r.user_id) AS user_email
       `,
-            [id, decision, note]
+            [id, decision === 'REJECTED' ? 'DENIED' : decision, note]
         );
 
-        // pg compatible across codebases (some adapters return {rowCount}, some don't)
-        const updated = (result as any).rowCount ?? (Array.isArray((result as any).rows) ? (result as any).rows.length : 0);
-        if (!updated) return res.status(404).json({ ok: false, error: 'not found' });
+        if (rows.length === 0) return res.status(404).json({ ok: false, error: 'not found' });
+
+        const row = rows[0];
+
+        // fire-and-forget decision email to the employee using your existing service
+        const firstDate = Array.isArray(row.dates) && row.dates.length
+            ? String(row.dates[0]).slice(0, 10)
+            : '';
+        Promise.resolve(
+            sendTimeOffEmail(
+                (decision === 'REJECTED' ? 'REJECTED' : decision) as 'APPROVED' | 'REJECTED',
+                {
+                    siteUrl: SITE_URL,
+                    employeeName: row.user_name || row.user_email || 'Employee',
+                    employeeEmail: row.user_email || '',
+                    date: firstDate || new Date().toISOString().slice(0, 10),
+                    decision: (decision === 'REJECTED' ? 'REJECTED' : 'APPROVED'),
+                    reason: note || row.reason || '',
+                }
+            )
+        ).catch(() => {});
 
         res.json({ ok: true });
     } catch (e: any) {
@@ -167,34 +197,29 @@ router.patch('/:id', ensureAuthed, ensureManager, async (req: AuthedReq, res) =>
     }
 });
 
-/**
- * Employee calendar: only this user's requests within [from,to]
- * Query: from=YYYY-MM-DD&to=YYYY-MM-DD
- */
+// Employee calendar (only my requests)
 router.get('/calendar', ensureAuthed, async (req: AuthedReq, res) => {
     try {
         const { from, to } = getFromTo(req);
 
         const { rows } = await db.query(
             `
-      SELECT
-        r.id,
-        r.user_id        AS "userId",
-        u.full_name      AS "name",
-        u.email          AS "email",
-        r.status,
-        r.reason,
-        r.created_at     AS "created_at",
-        ARRAY(
-          SELECT (d)::timestamptz FROM unnest(r.dates) AS d
-        )                AS "dates"
-      FROM time_off_requests r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.dates && daterange($1::date, $2::date, '[]')
-        AND r.status IN ('PENDING','APPROVED')
-        AND r.user_id = $3
-      ORDER BY r.created_at DESC
-      `,
+                SELECT
+                    r.id,
+                    r.user_id        AS "userId",
+                    u.full_name      AS "name",
+                    u.email          AS "email",
+                    r.status,
+                    r.reason,
+                    r.created_at     AS "created_at",
+                    ARRAY(SELECT (d)::timestamptz FROM unnest(r.dates) AS d) AS "dates"
+                FROM time_off_requests r
+                         JOIN users u ON u.id = r.user_id
+                WHERE r.dates && daterange($1::date, $2::date, '[]')
+                  AND r.status IN ('PENDING','APPROVED')
+                  AND r.user_id = $3
+                ORDER BY r.created_at DESC
+            `,
             [from, to, req.user!.id]
         );
 
@@ -207,33 +232,28 @@ router.get('/calendar', ensureAuthed, async (req: AuthedReq, res) => {
     }
 });
 
-/**
- * Manager calendar: ALL users’ requests within [from,to]
- * Query: from=YYYY-MM-DD&to=YYYY-MM-DD
- */
+// Manager calendar (all employees)
 router.get('/manager/calendar', ensureAuthed, ensureManager, async (req: AuthedReq, res) => {
     try {
         const { from, to } = getFromTo(req);
 
         const { rows } = await db.query(
             `
-      SELECT
-        r.id,
-        r.user_id        AS "userId",
-        u.full_name      AS "name",
-        u.email          AS "email",
-        r.status,
-        r.reason,
-        r.created_at     AS "created_at",
-        ARRAY(
-          SELECT (d)::timestamptz FROM unnest(r.dates) AS d
-        )                AS "dates"
-      FROM time_off_requests r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.dates && daterange($1::date, $2::date, '[]')
-        AND r.status IN ('PENDING','APPROVED')
-      ORDER BY r.created_at DESC, u.full_name ASC
-      `,
+                SELECT
+                    r.id,
+                    r.user_id        AS "userId",
+                    u.full_name      AS "name",
+                    u.email          AS "email",
+                    r.status,
+                    r.reason,
+                    r.created_at     AS "created_at",
+                    ARRAY(SELECT (d)::timestamptz FROM unnest(r.dates) AS d) AS "dates"
+                FROM time_off_requests r
+                         JOIN users u ON u.id = r.user_id
+                WHERE r.dates && daterange($1::date, $2::date, '[]')
+                  AND r.status IN ('PENDING','APPROVED')
+                ORDER BY r.created_at DESC, u.full_name ASC
+            `,
             [from, to]
         );
 
