@@ -1,7 +1,7 @@
 // server/src/routes/timeOff.ts
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
-import * as db from '../db';                 // ✅ import module namespace; use db.query(...)
+import * as db from '../db'; // module-namespace import for db.query
 import { requireAuth } from '../auth';
 import { sendEmail } from '../services/email';
 
@@ -60,7 +60,7 @@ router.post('/time-off', requireAuth, async (req: Request, res: Response) => {
         const to = ['hr@republicfinancialservices.com', ...approverEmails];
 
         await sendEmail({
-            // no `from` field — EmailMessage doesn't include it; default sender is used by mailer
+            // no `from` field (mailer default sender is used)
             to,
             subject,
             text,
@@ -98,16 +98,19 @@ router.patch('/time-off/:id', requireAuth, async (req: Request, res: Response) =
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
 
-        const { rowCount } = await db.query(
+        const { rows } = await db.query(
             `
                 UPDATE time_off_requests
                 SET status = $2, decision_note = $3, decided_at = NOW()
                 WHERE id = $1
+                    RETURNING id
             `,
             [id, body.decision, body.note ?? null],
         );
 
-        if (!rowCount) return res.status(404).json({ ok: false, error: 'not found' });
+        if (rows.length === 0) {
+            return res.status(404).json({ ok: false, error: 'not found' });
+        }
         return res.json({ ok: true });
     } catch (e: any) {
         return res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
