@@ -15,27 +15,28 @@ const router = Router();
 // Build tag + quick route inspector
 console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
 
-// List registered paths to verify deploy
 router.get('/_routes', (_req, res) => {
-    // @ts-ignore accessing internal stack just for debugging
-    const list = (router.stack || [])
-        .filter((l: any) => l?.route)
-        .map((l: any) => {
-            const method = Object.keys(l.route.methods)[0];
-            return `${method.toUpperCase()} ${l.route.path}`;
+    type Layer = { route?: { path: string; methods: Record<string, boolean> } };
+    const stack: Layer[] = ((router as unknown as { stack?: Layer[] }).stack ?? []);
+    const list = stack
+        .filter(l => !!l.route)
+        .map(l => {
+            const method = l.route ? Object.keys(l.route.methods)[0] : 'get';
+            return `${method.toUpperCase()} ${l.route?.path}`;
         });
     res.json({ routes: list });
 });
 
 function getUser(req: ReqWithUser): AppUser {
     if (req.user?.id) return req.user;
-
     const raw = req.header('x-dev-user');
     if (raw) {
         try {
             const parsed = JSON.parse(raw);
             if (parsed?.id) return parsed as AppUser;
-        } catch {/* ignore */}
+        } catch {
+            // ignore
+        }
     }
     throw new Error('Unauthenticated: missing user (set x-dev-user in dev)');
 }
@@ -68,8 +69,8 @@ async function createTimeOffRequest(req: ReqWithUser, res: Response) {
 
         const { rows } = await db.query(
             `INSERT INTO time_off_requests (user_id, dates, reason, status, created_at)
-       VALUES ($1, $2::date[], $3, 'PENDING', now())
-       RETURNING id`,
+             VALUES ($1, $2::date[], $3, 'PENDING', now())
+                 RETURNING id`,
             [user.id, dates, reason]
         );
 
@@ -88,12 +89,12 @@ router.get('/pending', async (_req: ReqWithUser, res: Response) => {
     try {
         const { rows } = await db.query(
             `SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-              COALESCE(u.full_name,'') AS user_name,
-              COALESCE(u.email,'')     AS user_email
-         FROM time_off_requests r
-    LEFT JOIN users u ON u.id = r.user_id
-        WHERE r.status = 'PENDING'
-     ORDER BY r.created_at DESC`,
+                    COALESCE(u.full_name,'') AS user_name,
+                    COALESCE(u.email,'')     AS user_email
+             FROM time_off_requests r
+                      LEFT JOIN users u ON u.id = r.user_id
+             WHERE r.status = 'PENDING'
+             ORDER BY r.created_at DESC`,
             []
         );
         res.json(rows);
@@ -114,11 +115,11 @@ router.patch('/:id', async (req: ReqWithUser, res: Response) => {
 
         const { rows } = await db.query(
             `UPDATE time_off_requests
-          SET status = $2,
-              decision_note = COALESCE($3, decision_note),
-              decided_at = now()
-        WHERE id = $1
-      RETURNING id`,
+             SET status = $2,
+                 decision_note = COALESCE($3, decision_note),
+                 decided_at = now()
+             WHERE id = $1
+                 RETURNING id`,
             [id, decision, note ?? null]
         );
 
