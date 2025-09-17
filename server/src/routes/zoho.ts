@@ -144,7 +144,6 @@ router.get('/callback', async (req: Request, res: Response) => {
             zohoUserId,
             accessToken,
             refreshToken,
-            tokenType,
             expiresIn,
             scope,
             receivedAt: new Date(),
