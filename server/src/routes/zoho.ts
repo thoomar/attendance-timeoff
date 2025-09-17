@@ -1,50 +1,44 @@
-// server/src/routes/zoho.ts
-import express, { Request, Response } from 'express';
-import { exchangeCodeForToken, saveZohoTokens } from '../services/zoho';
-
-const router = express.Router();
+// server/src/services/zoho.ts
+import { db } from '../db';
 
 const {
-    // Default to landing the user on your time-off route (override in env if desired)
-    PUBLIC_APP_URL = 'https://timeoff.timesharehelpcenter.com/time-off',
-
-    // Adjust for EU/IN tenants if needed
     ZOHO_ACCOUNTS_BASE = 'https://accounts.zoho.com',
-    ZOHO_API_BASE = 'https://www.zohoapis.com',
-
-    // OAuth app config (must match your Zoho client)
     ZOHO_CLIENT_ID = '',
     ZOHO_CLIENT_SECRET = '',
     ZOHO_REDIRECT_URI = '',
-
-    // Scopes configured on your Zoho client
     ZOHO_SCOPES = 'ZohoCRM.modules.ALL ZohoCRM.settings.ALL AaaServer.profile.Read',
 } = process.env;
 
-/** Ensure redirect targets are valid URLs */
-function safeUrl(url: string): string {
-    try {
-        return new URL(url).toString();
-    } catch {
-        return 'https://timeoff.timesharehelpcenter.com/time-off';
-    }
+/** ---------- Types ---------- */
+export type ExchangeTokenResponse = {
+    access_token: string;
+    refresh_token?: string;
+    token_type?: string;
+    expires_in?: number; // seconds
+    scope?: string;
+    api_domain?: string;
+};
+
+export type SaveTokensInput = {
+    zohoUserId: string;
+    accessToken: string;
+    refreshToken?: string | null; // optional; we’ll reuse existing if absent
+    scope?: string | null;        // optional; defaults to ZOHO_SCOPES
+    expiresIn?: number | null;    // seconds; defaults to 3600 if absent
+    tokenType?: string | null;    // optional
+    apiDomain?: string | null;    // optional
+};
+
+/** Small helper to ensure we never store an absurd expiresAt */
+function computeExpiresAt(expiresInSeconds?: number | null): Date {
+    const seconds = typeof expiresInSeconds === 'number' && expiresInSeconds > 0
+        ? expiresInSeconds
+        : 3600; // 1 hour fallback
+    return new Date(Date.now() + seconds * 1000);
 }
 
-/** Build Zoho authorize URL */
-function buildZohoAuthorizeUrl(scopes: string): string {
-    const u = new URL('/oauth/v2/auth', ZOHO_ACCOUNTS_BASE);
-    u.searchParams.set('response_type', 'code');
-    u.searchParams.set('client_id', ZOHO_CLIENT_ID!);
-    u.searchParams.set('redirect_uri', ZOHO_REDIRECT_URI!);
-    u.searchParams.set('scope', scopes.trim());
-    // force refresh_token issuance on re-consent
-    u.searchParams.set('access_type', 'offline');
-    u.searchParams.set('prompt', 'consent');
-    return u.toString();
-}
-
-/** Fallback token exchange if service helper changes */
-async function exchangeCodeWithFetch(code: string) {
+/** ---------- OAuth: exchange auth code for tokens ---------- */
+export async function exchangeCodeForToken(code: string): Promise<ExchangeTokenResponse> {
     const tokenUrl = new URL('/oauth/v2/token', ZOHO_ACCOUNTS_BASE);
     const form = new URLSearchParams({
         grant_type: 'authorization_code',
@@ -65,78 +59,113 @@ async function exchangeCodeWithFetch(code: string) {
         throw new Error(`Zoho token exchange failed: ${resp.status} ${txt}`);
     }
 
-    return resp.json() as Promise<{
-        access_token: string;
-        refresh_token?: string;
-    }>;
+    const data = (await resp.json()) as ExchangeTokenResponse;
+    return data;
 }
 
-/** Resolve the current Zoho user id */
-async function getCurrentZohoUserId(accessToken: string): Promise<string> {
-    const u = new URL('/crm/v2/users', ZOHO_API_BASE);
-    u.searchParams.set('type', 'CurrentUser');
+/** ---------- Tokens: save/upsert using your partial unique constraint ---------- */
+export async function saveZohoTokens(input: SaveTokensInput): Promise<void> {
+    const {
+        zohoUserId,
+        accessToken,
+        refreshToken: refreshTokenCandidate,
+        scope: scopeCandidate,
+        expiresIn,
+        tokenType,
+        apiDomain,
+    } = input;
 
-    const resp = await fetch(u, {
-        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
-    });
-
-    if (!resp.ok) {
-        const txt = await resp.text();
-        throw new Error(`Zoho whoami failed: ${resp.status} ${txt}`);
+    // 1) If no refreshToken provided, try to reuse existing ACTIVE (revoked IS NOT TRUE) row’s refresh_token
+    let refreshTokenFinal: string | null | undefined = refreshTokenCandidate ?? null;
+    if (!refreshTokenFinal) {
+        const sel = await db.query<{
+            refresh_token: string | null;
+        }>(
+            `
+      SELECT refresh_token
+      FROM zoho_tokens
+      WHERE zoho_user_id = $1
+        AND revoked IS NOT TRUE
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC
+      LIMIT 1
+      `,
+            [zohoUserId]
+        );
+        refreshTokenFinal = sel.rows[0]?.refresh_token ?? null;
     }
 
-    const data = await resp.json();
-    const id = data?.users?.[0]?.id;
-    if (!id) throw new Error('Could not resolve current Zoho user id');
-    return String(id);
+    // Your table has "refresh_token TEXT NOT NULL", so we must not INSERT null.
+    // If still missing, force caller to re-consent (Zoho will return a refresh_token with prompt=consent + access_type=offline).
+    if (!refreshTokenFinal) {
+        throw new Error(
+            'Missing refresh_token and no active token to reuse. Ask the user to reconnect Zoho (consent required).'
+        );
+    }
+
+    // 2) Fill required/optional fields
+    const scopeFinal = scopeCandidate ?? ZOHO_SCOPES;
+    const expiresAt = computeExpiresAt(expiresIn); // timestamptz value
+    const tokenTypeFinal = tokenType ?? null;
+    const apiDomainFinal = apiDomain ?? null;
+
+    // 3) Upsert using your existing partial unique constraint:
+    //    uniq_zoho_tokens_active_user UNIQUE (zoho_user_id) WHERE revoked IS NOT TRUE
+    //    This lets you keep historical rows (revoked = TRUE) while guaranteeing one active row per user.
+    await db.query(
+        `
+    INSERT INTO zoho_tokens (
+      zoho_user_id, access_token, refresh_token, scope, expires_at,
+      token_type, api_domain, revoked, created_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5,
+      $6, $7, FALSE, now(), now()
+    )
+    ON CONFLICT ON CONSTRAINT uniq_zoho_tokens_active_user
+    DO UPDATE SET
+      access_token  = EXCLUDED.access_token,
+      -- keep the existing refresh_token if the new one is null/empty:
+      refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token, ''), zoho_tokens.refresh_token),
+      scope         = EXCLUDED.scope,
+      expires_at    = EXCLUDED.expires_at,
+      token_type    = EXCLUDED.token_type,
+      api_domain    = EXCLUDED.api_domain,
+      updated_at    = now()
+    `,
+        [
+            zohoUserId,
+            accessToken,
+            refreshTokenFinal,
+            scopeFinal,
+            expiresAt,
+            tokenTypeFinal,
+            apiDomainFinal,
+        ]
+    );
 }
 
-/** 1) Start OAuth */
-router.get('/start', (_req: Request, res: Response) => {
-    try {
-        return res.redirect(302, buildZohoAuthorizeUrl(ZOHO_SCOPES));
-    } catch (e: any) {
-        console.error('[ZOHO][START] Error building auth URL:', e);
-        return res.redirect(303, safeUrl(PUBLIC_APP_URL) + '#zoho-auth-error');
-    }
-});
-
-/** 2) OAuth callback: exchange code -> tokens, save minimal fields, redirect */
-router.get('/callback', async (req: Request, res: Response) => {
-    const { code, error } = req.query as { code?: string; error?: string };
-
-    if (error) {
-        console.error('[ZOHO][CALLBACK] error from Zoho:', error);
-        return res.redirect(303, safeUrl(PUBLIC_APP_URL) + '#zoho-auth-error');
-    }
-    if (!code) {
-        console.error('[ZOHO][CALLBACK] missing code');
-        return res.redirect(303, safeUrl(PUBLIC_APP_URL) + '#zoho-auth-error');
-    }
-
-    try {
-        const tokens =
-            typeof exchangeCodeForToken === 'function'
-                ? await exchangeCodeForToken(code)
-                : await exchangeCodeWithFetch(code);
-
-        const accessToken = (tokens as any).access_token ?? tokens.access_token;
-        const refreshToken = (tokens as any).refresh_token ?? tokens.refresh_token;
-
-        const zohoUserId = await getCurrentZohoUserId(accessToken);
-
-        // Build payload with only allowed keys; add refreshToken only if present
-        const payload: any = { zohoUserId, accessToken };
-        if (refreshToken) payload.refreshToken = refreshToken;
-
-        await saveZohoTokens(payload);
-
-        // Success: clean landing (NO query params)
-        return res.redirect(303, safeUrl(PUBLIC_APP_URL));
-    } catch (e: any) {
-        console.error('[ZOHO][CALLBACK] Failed to handle callback:', e?.message || e);
-        return res.redirect(303, safeUrl(PUBLIC_APP_URL) + '#zoho-auth-error');
-    }
-});
-
-export default router;
+/** ---------- (Optional) helper to revoke older duplicates if you ever switch to a global unique ----------
+ *
+ * If you ever want a FULL unique index on (zoho_user_id) instead of the partial one,
+ * run the dedupe below first to ensure only one active row per user remains:
+ *
+ * WITH ranked AS (
+ *   SELECT id, zoho_user_id,
+ *          row_number() OVER (
+ *            PARTITION BY zoho_user_id
+ *            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+ *          ) AS rn
+ *   FROM zoho_tokens
+ *   WHERE revoked IS NOT TRUE
+ * )
+ * UPDATE zoho_tokens z
+ * SET revoked = TRUE, updated_at = now()
+ * FROM ranked r
+ * WHERE z.id = r.id
+ *   AND r.rn > 1;
+ *
+ * Then create a global unique index:
+ *   CREATE UNIQUE INDEX uq_zoho_tokens_zoho_user_idx ON zoho_tokens (zoho_user_id);
+ *
+ * NOTE: You do NOT need to do this for your current setup—your partial unique works fine
+ *       as long as your UPSERT uses "ON CONFLICT ON CONSTRAINT uniq_zoho_tokens_active_user".
+ */
