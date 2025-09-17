@@ -5,14 +5,10 @@ import * as db from '../db';
 
 const router = Router();
 
-/** tiny build marker so we can see the compiled file got deployed */
+/** build marker so we can confirm the compiled file is new */
 (() => {
     // eslint-disable-next-line no-console
-    console.log(
-        'TIMEOFF ROUTE BUILD TAG',
-        new Date().toISOString(),
-        __filename.replace(process.cwd(), ''),
-    );
+    console.log('TIMEOFF ROUTE BUILD TAG', new Date().toISOString(), __filename);
 })();
 
 type ReqUser = {
@@ -32,9 +28,7 @@ function getReqUser(req: Request): ReqUser | null {
     try {
         const parsed = JSON.parse(raw);
         if (parsed?.id) return parsed;
-    } catch {
-        /* ignore */
-    }
+    } catch {/* ignore */}
     return null;
 }
 
@@ -85,7 +79,7 @@ async function createRequestHandler(req: Request, res: Response) {
     }
 }
 
-// Legacy alias (old UI posts here)
+// Legacy alias kept for older UI
 router.post('/requests', createRequestHandler);
 // Canonical path
 router.post('/', createRequestHandler);
@@ -142,9 +136,7 @@ router.patch('/:id', async (req, res) => {
                 RETURNING id
         `;
         const { rows } = await db.query(q, [id, next, note ?? null]);
-
         if (rows.length === 0) return bad(res, 404, 'not found');
-
         return res.json({ ok: true });
     } catch (e: any) {
         return bad(res, 500, e?.message || 'update failed');
