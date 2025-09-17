@@ -5,7 +5,7 @@ import express from 'express';
 
 import meRoutes from './routes/me';
 import timeOffRoutes from './routes/timeOff';
-import zohoRoutes from './routes/zoho';
+import zohoRouter from './routes/zoho';
 
 dotenv.config();
 
@@ -14,7 +14,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/me', meRoutes);
-app.use('/api/zoho', zohoRoutes);
+app.use('/api/zoho', zohoRouter);
 app.use('/api/time-off', timeOffRoutes);
 
 // health
