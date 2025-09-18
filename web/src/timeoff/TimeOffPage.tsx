@@ -6,16 +6,15 @@ import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal } from 'lucide
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
-
 type User = { id: string; name: string; role: Role };
 
 // Server calendar entry shape (normalized below)
 type CalendarEntry = {
     userId: string;
     userName: string;
-    dates: string[];             // ISO strings
+    dates: string[];                 // ISO strings
     status: 'PENDING' | 'APPROVED';
-    submittedAt?: string;        // ISO (created_at)
+    submittedAt?: string;            // ISO (created_at)
 };
 
 // Pending approval item (manager)
@@ -23,9 +22,9 @@ type PendingUIItem = {
     id: string;
     employeeName?: string;
     employeeEmail?: string;
-    date: string;                // "YYYY-MM-DD" or range
+    date: string;                    // "YYYY-MM-DD" or range
     reason: string;
-    submittedAt?: string;        // ISO
+    submittedAt?: string;            // ISO
 };
 
 /** ----------------- Helpers for the Zoho loop fix ----------------- */
@@ -44,7 +43,7 @@ function stripQueryParams(): void {
 }
 /** ----------------------------------------------------------------- */
 
-/** Formatting helpers */
+// Formatting helpers
 function fmtTimeLocal(iso?: string): string {
     if (!iso) return '';
     const d = new Date(iso);
@@ -52,7 +51,6 @@ function fmtTimeLocal(iso?: string): string {
     return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 function fmtMDY(isoDate: string): string {
-    // isoDate can be "YYYY-MM-DD" or ISO timestamp. Always format to MM/DD/YYYY.
     const d = new Date(isoDate);
     if (Number.isNaN(d.getTime())) return isoDate;
     return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
@@ -99,24 +97,22 @@ export default function TimeOffPage() {
                 }
 
                 if (!isConnected && !justReturnedFromZoho) {
-                    const returnTo = '/';
-                    window.location.assign(`/api/zoho/start?returnTo=${encodeURIComponent(returnTo)}`);
+                    const returnTo = '/time-off';
+                    window.location.assign(`/api/zoho/connect?returnTo=${encodeURIComponent(returnTo)}`);
                 }
             } catch {
                 if (!cancelled) setZohoConnected(false);
             }
         })();
 
-        return () => {
-            cancelled = true;
-        };
+        return () => { cancelled = true; };
     }, [justReturnedFromZoho]);
 
     // --- Load current user ---
     useEffect(() => {
         (async () => {
             try {
-                const r = await fetch('/api/me');
+                const r = await fetch('/api/me', { credentials: 'include' });
                 const d = await r.json();
                 // backend returns { id, email, fullName, role }
                 const mapped: User = { id: d?.id, name: d?.fullName || d?.name || 'User', role: d?.role };
@@ -127,7 +123,7 @@ export default function TimeOffPage() {
         })();
     }, []);
 
-    // --- Load calendar (employee vs manager endpoint) ---
+    // --- Load calendar (all users come from the same endpoint) ---
     useEffect(() => {
         if (!user) return;
 
@@ -136,12 +132,7 @@ export default function TimeOffPage() {
         to.setMonth(to.getMonth() + 2);
         const qs = `from=${from.toISOString().slice(0, 10)}&to=${to.toISOString().slice(0, 10)}`;
 
-        const managerView = user.role === 'Manager' || user.role === 'Admin';
-        const url = managerView
-            ? `/api/time-off/manager/calendar?${qs}`
-            : `/api/time-off/calendar?${qs}`;
-
-        fetch(url)
+        fetch(`/api/time-off/calendar?${qs}`, { credentials: 'include' })
             .then(r => r.json())
             .then((d: any) => {
                 const entries: CalendarEntry[] = Array.isArray(d?.entries)
@@ -162,14 +153,12 @@ export default function TimeOffPage() {
     useEffect(() => {
         if (!user) return;
         if (user.role === 'Manager' || user.role === 'Admin') {
-            fetch('/api/time-off/pending')
+            fetch('/api/time-off/pending', { credentials: 'include' })
                 .then(r => r.json())
                 .then((raw: any) => {
                     const out: PendingUIItem[] = [];
                     if (Array.isArray(raw)) {
                         for (const item of raw) {
-                            // Flat server shape from /pending:
-                            // { id, user_id, dates, reason, status, created_at, user_name, user_email }
                             if (item?.id) {
                                 const range =
                                     Array.isArray(item.dates) && item.dates.length
@@ -204,6 +193,7 @@ export default function TimeOffPage() {
             const res = await fetch('/api/time-off/requests', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify(body),
             });
 
@@ -233,12 +223,13 @@ export default function TimeOffPage() {
         }
     }
 
-    // --- Approve / Reject (PATCH /api/time-off/:id) ---
-    async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
+    // --- Approve / Deny (PATCH /api/time-off/:id) ---
+    async function decide(id: string, decision: 'APPROVED' | 'DENIED') {
         try {
             const res = await fetch(`/api/time-off/${encodeURIComponent(id)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ decision, note: '' }),
             });
             if (!res.ok) {
@@ -262,7 +253,7 @@ export default function TimeOffPage() {
                     <h2 className="text-lg font-semibold">Connect Zoho</h2>
                     <p className="text-slate-400 text-sm">Please connect your Zoho account to continue.</p>
                     <a
-                        href={`/api/zoho/start?returnTo=${encodeURIComponent('/')}`}
+                        href={`/api/zoho/connect?returnTo=${encodeURIComponent('/time-off')}`}
                         className="btn-primary inline-flex"
                     >
                         Connect Zoho
@@ -398,7 +389,7 @@ export default function TimeOffPage() {
                                                 <CheckCircle2 className="h-4 w-4" />
                                                 Approve
                                             </button>
-                                            <button onClick={() => decide(p.id, 'REJECTED')} className="btn">
+                                            <button onClick={() => decide(p.id, 'DENIED')} className="btn">
                                                 Reject
                                             </button>
                                         </div>
