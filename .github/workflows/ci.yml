@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # Ensure devDeps are installed, even if an .npmrc or env tries to omit them
       NPM_CONFIG_PRODUCTION: "false"
