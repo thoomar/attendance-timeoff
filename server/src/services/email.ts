@@ -10,7 +10,7 @@ const user = process.env.SMTP_USER || '';
 const pass = process.env.SMTP_PASS || '';
 const fromEmail = process.env.MAIL_FROM || process.env.FROM_EMAIL || 'no-reply@timesharehelpcenter.com';
 
-let transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransport({
     host,
     port,
     secure,
