@@ -7,7 +7,6 @@ import session from 'express-session';
 
 import meRoutes from './routes/me';
 import timeOffRoutes from './routes/timeOff';
-import zohoRouter from './routes/zoho';
 import authRoutes from './routes/auth';
 
 const {
@@ -49,7 +48,6 @@ app.use(
 // routes
 app.use('/api/auth', authRoutes);
 app.use('/api/me', meRoutes);
-app.use('/api/zoho', zohoRouter);
 app.use('/api/time-off', timeOffRoutes);
 
 // health
