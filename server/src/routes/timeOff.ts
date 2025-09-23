@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../auth/entra';
 import * as db from '../db';
@@ -19,10 +19,10 @@ const VALID_ROLES = new Set([
     'Admin',
 ]);
 
-// Use a safe default role if we don't know yet
-const DEFAULT_ROLE = process.env.DEFAULT_USER_ROLE && VALID_ROLES.has(process.env.DEFAULT_USER_ROLE)
-    ? process.env.DEFAULT_USER_ROLE
-    : 'Enrollment Specialist';
+const DEFAULT_ROLE =
+    process.env.DEFAULT_USER_ROLE && VALID_ROLES.has(process.env.DEFAULT_USER_ROLE)
+        ? process.env.DEFAULT_USER_ROLE
+        : 'Enrollment Specialist';
 
 const CreateReq = z.object({
     dates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).min(1),
@@ -34,22 +34,36 @@ const DecisionReq = z.object({
     note: z.string().max(2000).optional(),
 });
 
-const asDate = (d: string) => d;
+// Dev shim so curl with `x-dev-user` works even with Entra auth
+function devUserShim(req: Request, _res: Response, next: NextFunction) {
+    const h = req.headers['x-dev-user'];
+    if (h) {
+        try {
+            const parsed = JSON.parse(String(h));
+            (req as any).session = (req as any).session || {};
+            (req as any).session.user = {
+                email: parsed.email,
+                name: parsed.fullName || parsed.name || null,
+                id: parsed.id, // optional, not used by ensureUserId
+            };
+        } catch {
+            // ignore
+        }
+    }
+    next();
+}
 
-// Upsert users row by email to satisfy your NOT NULL/role constraints and UUID PK
+// Upsert users row by email to satisfy NOT NULL constraints & UUID PK
 async function ensureUserId(email: string, fullName?: string | null): Promise<string> {
-    // 1) Try existing user
     const found = await db.query<{ id: string }>(
         `SELECT id FROM users WHERE email = $1 LIMIT 1`,
-        [email]
+        [email],
     );
     if (found.rows?.[0]?.id) return String(found.rows[0].id);
 
-    // 2) Insert if missing. Your schema requires full_name NOT NULL and role NOT NULL.
     const name = (fullName && fullName.trim()) ? fullName.trim() : email;
     const role = DEFAULT_ROLE;
 
-    // Prefer ON CONFLICT(email) to avoid races
     const upsert = await db.query<{ id: string }>(
         `
     INSERT INTO users (id, email, full_name, role, created_at, updated_at)
@@ -59,7 +73,7 @@ async function ensureUserId(email: string, fullName?: string | null): Promise<st
           updated_at = NOW()
     RETURNING id
     `,
-        [email, name, role]
+        [email, name, role],
     );
 
     return String(upsert.rows[0].id);
@@ -71,6 +85,9 @@ async function ensureUserId(email: string, fullName?: string | null): Promise<st
 
 router.get('/_ping', (_req, res) => res.json({ ok: true, route: 'time-off' }));
 
+// Apply dev shim so it runs before requireAuth on this router
+router.use(devUserShim);
+
 // Create time-off request
 router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, res: Response) => {
     try {
@@ -80,23 +97,23 @@ router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, re
         const { dates, reason } = CreateReq.parse(req.body);
         const userId = await ensureUserId(sessUser.email, sessUser.name ?? null);
 
-        // Insert request; your table uses uuid PK and uuid user_id, dates DATE[] (nullable).
+        // Insert as DATE[] (array)
         const { rows } = await db.query<{ id: string }>(
             `
-      INSERT INTO time_off_requests (
-        id, user_id, dates, reason, status, created_at, updated_at
-      )
-      VALUES (
-        uuid_generate_v4(), $1, $2::date[], $3, 'PENDING', NOW(), NOW()
-      )
-      RETURNING id
-      `,
-            [userId, dates.map(asDate), reason]
+                INSERT INTO time_off_requests (
+                    id, user_id, dates, reason, status, created_at, updated_at
+                )
+                VALUES (
+                           uuid_generate_v4(), $1, $2::date[], $3, 'PENDING', NOW(), NOW()
+                       )
+                    RETURNING id
+            `,
+            [userId, dates, reason],
         );
 
         const id = rows?.[0]?.id;
 
-        // Notify approvers/HR via your HTML helper
+        // Notify HR + approvers
         try {
             await sendTimeOffEmail('NEW_REQUEST', {
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
@@ -111,6 +128,7 @@ router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, re
 
         return res.json({ ok: true, id });
     } catch (e: any) {
+        console.error('[time-off][create] error:', e?.stack || e);
         return res.status(400).json({ ok: false, error: e?.message || 'create failed' });
     }
 });
@@ -125,17 +143,18 @@ router.get('/mine', requireAuth, async (req: Request, res: Response) => {
 
         const { rows } = await db.query(
             `
-      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-             u.full_name AS user_name, u.email AS user_email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.user_id = $1
-      ORDER BY r.created_at DESC
-      `,
-            [userId]
+                SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+                       u.full_name AS user_name, u.email AS user_email
+                FROM time_off_requests r
+                         LEFT JOIN users u ON u.id = r.user_id
+                WHERE r.user_id = $1
+                ORDER BY r.created_at DESC
+            `,
+            [userId],
         );
         return res.json({ ok: true, items: rows });
     } catch (e: any) {
+        console.error('[time-off][mine] error:', e?.stack || e);
         return res.status(500).json({ ok: false, error: e?.message || 'mine failed' });
     }
 });
@@ -145,17 +164,18 @@ router.get('/pending', requireAuth, async (_req: Request, res: Response) => {
     try {
         const { rows } = await db.query(
             `
-      SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
-             u.full_name AS user_name, u.email AS user_email
-      FROM time_off_requests r
-      LEFT JOIN users u ON u.id = r.user_id
-      WHERE r.status = 'PENDING'
-      ORDER BY r.created_at DESC
-      `,
-            []
+                SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+                       u.full_name AS user_name, u.email AS user_email
+                FROM time_off_requests r
+                         LEFT JOIN users u ON u.id = r.user_id
+                WHERE r.status = 'PENDING'
+                ORDER BY r.created_at DESC
+            `,
+            [],
         );
-        return res.json(rows);
+        return res.json({ ok: true, items: rows });
     } catch (e: any) {
+        console.error('[time-off][pending] error:', e?.stack || e);
         return res.status(500).json({ ok: false, error: e?.message || 'pending failed' });
     }
 });
@@ -168,20 +188,21 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
 
         const { rows } = await db.query(
             `
-      UPDATE time_off_requests
-      SET status = $2,
-          decision_note = $3,
-          decided_at = NOW(),
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING id
-      `,
-            [id, body.decision, body.note ?? null]
+                UPDATE time_off_requests
+                SET status = $2,
+                    decision_note = $3,
+                    decided_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $1
+                    RETURNING id
+            `,
+            [id, body.decision, body.note ?? null],
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
         return res.json({ ok: true });
     } catch (e: any) {
+        console.error('[time-off][decision:patch] error:', e?.stack || e);
         return res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
     }
 });
@@ -202,17 +223,18 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
                 WHERE id = $1
                     RETURNING id
             `,
-            [id, body.decision, body.note ?? null]
+            [id, body.decision, body.note ?? null],
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
         return res.json({ ok: true });
     } catch (e: any) {
+        console.error('[time-off][decision:post] error:', e?.stack || e);
         return res.status(400).json({ ok: false, error: e?.message || 'decision failed' });
     }
 });
 
-// Calendar
+// Calendar (DATE[] via UNNEST)
 router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
     try {
         const from = (req.query.from as string) || new Date().toISOString().slice(0, 10);
@@ -230,7 +252,7 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
                 )
                 ORDER BY r.user_id, r.id DESC
             `,
-            [from, to]
+            [from, to],
         );
 
         const entries = (rows || []).map((r: any) => ({
@@ -242,9 +264,9 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
             dates: r.dates as string[],
         }));
 
-        return res.json({ entries });
+        return res.json({ ok: true, entries });
     } catch (e: any) {
-        console.error('calendar failed', e);
+        console.error('[time-off][calendar] error:', e?.stack || e);
         return res.status(500).json({ ok: false, error: e?.message || 'calendar failed' });
     }
 });
