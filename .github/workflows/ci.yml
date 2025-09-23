@@ -4,16 +4,17 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
-      # Ensure devDeps are installed, even if an .npmrc or env tries to omit them
       NPM_CONFIG_PRODUCTION: "false"
       NODE_ENV: development
 
@@ -30,41 +31,35 @@ jobs:
             server/package-lock.json
             web/package-lock.json
 
-      # Neutralize any production-only installs from .npmrc files
       - name: Force dev installs
         run: |
           echo "production=false" > .npmrc
           if [ -f server/.npmrc ]; then sed -i 's/^production=.*/production=false/' server/.npmrc || true; fi
           if [ -f web/.npmrc ]; then sed -i 's/^production=.*/production=false/' web/.npmrc || true; fi
 
-      # 🔑 Install deps for root + all workspaces (includes devDependencies)
       - name: Install dependencies (root + workspaces)
-        run: |
-          npm ci --include=dev --include-workspace-root --workspaces
+        run: npm ci --include=dev --include-workspace-root --workspaces
 
-      # Optional: prove globals & eslint are present
       - name: Verify ESLint deps
         run: |
           node -e "console.log('globals version:', require('globals/package.json').version)"
           npx eslint -v
 
-      # Typecheck
       - name: Typecheck (server)
         run: npm run -w server typecheck --if-present
+
       - name: Typecheck (web)
         run: npm run -w web typecheck --if-present
 
-      # Lint from root (uses eslint.config.mjs at root)
       - name: Lint (root)
         run: npm run lint --if-present
 
-      # Build
       - name: Build server
         run: npm run -w server build
+
       - name: Build web
         run: npm run -w web build
 
-      # Artifacts
       - name: Upload server build
         if: success()
         uses: actions/upload-artifact@v4
