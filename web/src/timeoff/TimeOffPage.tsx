@@ -284,7 +284,7 @@ export default function TimeOffPage() {
                             modifiers={{
                                 hasTimeOff: (date) => {
                                     const dateStr = date.toISOString().slice(0, 10);
-                                    return calendar.some(e => e.dates.includes(dateStr));
+                                    return calendar.some(e => e.dates.some(d => d.startsWith(dateStr)));
                                 }
                             }}
                             modifiersClassNames={{
@@ -293,7 +293,7 @@ export default function TimeOffPage() {
                             onDayClick={(day) => {
                                 const dateStr = day.toISOString().slice(0, 10);
                                 const peopleOff = calendar
-                                    .filter(e => e.dates.includes(dateStr))
+                                    .filter(e => e.dates.some(d => d.startsWith(dateStr)))
                                     .map(e => e.userName);
                                 if (peopleOff.length > 0) {
                                     setSelectedDateInfo({ date: fmtMDY(dateStr), people: peopleOff });
