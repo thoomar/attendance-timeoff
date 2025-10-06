@@ -108,13 +108,15 @@ export default function TimeOffPage() {
             .then(r => r.json())
             .then((d: any) => {
                 const entries: CalendarEntry[] = Array.isArray(d?.entries)
-                    ? d.entries.map((e: any) => ({
-                        userId: e.userId || e.user_id || '',
-                        userName: e.name || e.userName || user.name,
-                        dates: Array.isArray(e.dates) ? e.dates : [],
-                        status: e.status,
-                        submittedAt: e.created_at || e.submittedAt,
-                    }))
+                    ? d.entries
+                        .filter((e: any) => e.status === 'APPROVED') // Only show approved requests
+                        .map((e: any) => ({
+                            userId: e.userId || e.user_id || '',
+                            userName: e.name || e.userName || user.name,
+                            dates: Array.isArray(e.dates) ? e.dates : [],
+                            status: e.status,
+                            submittedAt: e.created_at || e.submittedAt,
+                        }))
                     : [];
                 setCalendar(entries);
             })
@@ -245,7 +247,7 @@ export default function TimeOffPage() {
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
                     <span className="text-xs text-slate-400">
-            Signed in as {user.name} ({user.role})
+            Signed in as {user.name}
           </span>
                 </div>
             </header>
@@ -316,10 +318,9 @@ export default function TimeOffPage() {
                                             <div className="space-y-0.5">
                                                 {/* “Submitted: 2:40 PM — Name — for 09/17/2025 - 09/18/2025” */}
                                                 <div className="text-slate-300">
-                                                    {submitted && <strong>Submitted:</strong>} {submitted || '—'}
+                                                    {submitted && <strong>Approved:</strong>} {submitted || '—'}
                                                     {e.userName ? <> — <strong>{e.userName}</strong></> : null}
                                                     {range ? <> — for <strong>{range}</strong></> : null}
-                                                    {e.status === 'PENDING' ? <> <span className="text-amber-400">(pending)</span></> : null}
                                                 </div>
                                             </div>
                                         </li>
