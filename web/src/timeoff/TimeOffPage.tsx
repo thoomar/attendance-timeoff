@@ -72,41 +72,8 @@ export default function TimeOffPage() {
     const [pending, setPending] = useState<PendingUIItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
 
-    // Zoho connection gate
-    const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
-
-    // Sentinel: did we just return from Zoho?
-    const justReturnedFromZoho = useMemo<boolean>(parseZohoCallbackFlag, []);
-
-    // --- Zoho connection check / redirect ---
-    useEffect(() => {
-        let cancelled = false;
-
-        (async () => {
-            try {
-                const r = await fetch('/api/zoho/status', { credentials: 'include' });
-                const d = await r.json();
-                if (cancelled) return;
-
-                const isConnected = Boolean(d?.connected);
-                setZohoConnected(isConnected);
-
-                if (isConnected && justReturnedFromZoho) {
-                    stripQueryParams();
-                    return;
-                }
-
-                if (!isConnected && !justReturnedFromZoho) {
-                    const returnTo = '/time-off';
-                    window.location.assign(`/api/zoho/connect?returnTo=${encodeURIComponent(returnTo)}`);
-                }
-            } catch {
-                if (!cancelled) setZohoConnected(false);
-            }
-        })();
-
-        return () => { cancelled = true; };
-    }, [justReturnedFromZoho]);
+    // Zoho disabled - using Microsoft O365 instead
+    const zohoConnected = true;
 
     // --- Load current user ---
     useEffect(() => {
