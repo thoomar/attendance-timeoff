@@ -120,3 +120,21 @@ export function requireRole(roles: Role[]) {
 export function currentUser(req: Request): Express.User {
     return req.user ?? DEMO_USER;
 }
+
+/**
+ * Middleware to attach req.user from session
+ * Used after session middleware to populate req.user for all routes
+ */
+export function attachSessionUser(req: Request, res: Response, next: NextFunction) {
+    const sessionUser = (req.session as any)?.user;
+    if (sessionUser) {
+        req.user = {
+            id: sessionUser.id || DEMO_USER.id,
+            email: sessionUser.email || DEMO_USER.email,
+            fullName: sessionUser.fullName || sessionUser.name || DEMO_USER.fullName,
+            role: sessionUser.role || DEMO_USER.role,
+            managerUserId: sessionUser.managerUserId || null,
+        };
+    }
+    next();
+}

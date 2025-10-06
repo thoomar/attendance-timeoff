@@ -10,7 +10,10 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@azure/identity": "^4.0.0",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
     "compression": "^1.8.1",
+    "connect-pg-simple": "^10.0.0",
     "cors": "^2.8.5",
     "dayjs": "^1.11.10",
     "dotenv": "^16.6.1",

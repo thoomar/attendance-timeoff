@@ -7,8 +7,10 @@ const r = Router();
 r.get('/', requireAuth, (req, res) => {
     const u = req.user;
     res.json({
-        ok: true,
-        user: { id: u.id, name: u.fullName, email: u.email, role: u.role || 'Employee' },
+        id: u.id,
+        fullName: u.fullName,
+        email: u.email,
+        role: u.role || 'Employee',
     });
 });
 

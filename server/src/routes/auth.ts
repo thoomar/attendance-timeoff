@@ -74,4 +74,39 @@ router.get('/callback/azure', async (req: Request, res: Response) => {
 
         const tokenSet = await client.callback(ENTRA_REDIRECT_URI!, params, {
             state,
-            code_ver_
+            code_verifier,
+        });
+
+        const claims = tokenSet.claims();
+        const email =
+            (claims.email as string) ||
+            (claims.upn as string) ||
+            (claims.preferred_username as string) ||
+            '';
+
+        const userPayload = {
+            id: (claims.oid as string) || (claims.sub as string),
+            email,
+            fullName: (claims.name as string) || email || 'Unknown',
+            role: 'Enrollment Specialist' as const,
+        };
+
+        (req.session as any).user = userPayload;
+        delete (req.session as any).oidc;
+
+        return res.redirect(APP_BASE_URL);
+    } catch (err) {
+        console.error('[ENTRA CALLBACK ERROR]', err);
+        return res.status(500).send('Login failed.');
+    }
+});
+
+/** Logout */
+router.post('/logout', (req: Request, res: Response) => {
+    req.session.destroy(() => {
+        res.clearCookie('attn.sid');
+        res.redirect(APP_BASE_URL);
+    });
+});
+
+export default router;
