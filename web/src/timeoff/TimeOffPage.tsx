@@ -73,7 +73,7 @@ export default function TimeOffPage() {
     const [submitting, setSubmitting] = useState(false);
     const [pending, setPending] = useState<PendingUIItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
-    const [selectedDateInfo, setSelectedDateInfo] = useState<{ date: string; people: string[] } | null>(null);
+    const [selectedDatesInfo, setSelectedDatesInfo] = useState<Array<{ date: string; dateStr: string; people: string[] }>>([]);
 
     // Zoho disabled - using Microsoft O365 instead
     const zohoConnected = true;
@@ -300,27 +300,52 @@ export default function TimeOffPage() {
                                 const month = String(day.getMonth() + 1).padStart(2, '0');
                                 const dayNum = String(day.getDate()).padStart(2, '0');
                                 const dateStr = `${year}-${month}-${dayNum}`;
+                                const displayDate = `${month}/${dayNum}/${year}`;
                                 
                                 const peopleOff = calendar
                                     .filter(e => e.dates.some(d => d.startsWith(dateStr)))
                                     .map(e => e.userName);
+                                
                                 if (peopleOff.length > 0) {
-                                    setSelectedDateInfo({ date: `${month}/${dayNum}/${year}`, people: peopleOff });
+                                    // Toggle: if already in list, remove it; otherwise add it
+                                    setSelectedDatesInfo(prev => {
+                                        const exists = prev.find(d => d.dateStr === dateStr);
+                                        if (exists) {
+                                            return prev.filter(d => d.dateStr !== dateStr);
+                                        } else {
+                                            return [...prev, { date: displayDate, dateStr, people: peopleOff }].sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+                                        }
+                                    });
                                 }
                             }}
                         />
 
-                        {selectedDateInfo && (
+                        {selectedDatesInfo.length > 0 && (
                             <div className="mt-4 p-4 rounded-xl border border-blue-700 bg-blue-950/30">
-                                <div className="flex items-center justify-between mb-2">
-                                    <h3 className="text-sm font-semibold">Time Off on {selectedDateInfo.date}</h3>
-                                    <button onClick={() => setSelectedDateInfo(null)} className="text-xs text-slate-400 hover:text-slate-200">Close</button>
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-sm font-semibold">Time Off Summary ({selectedDatesInfo.length} date{selectedDatesInfo.length === 1 ? '' : 's'})</h3>
+                                    <button onClick={() => setSelectedDatesInfo([])} className="text-xs text-slate-400 hover:text-slate-200">Clear All</button>
                                 </div>
-                                <ul className="text-sm text-slate-300 space-y-1">
-                                    {selectedDateInfo.people.map((person, idx) => (
-                                        <li key={idx}>• {person}</li>
+                                <div className="space-y-3">
+                                    {selectedDatesInfo.map((dateInfo, idx) => (
+                                        <div key={idx} className="border-b border-slate-700 pb-2 last:border-0 last:pb-0">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <h4 className="text-xs font-semibold text-blue-400">{dateInfo.date}</h4>
+                                                <button 
+                                                    onClick={() => setSelectedDatesInfo(prev => prev.filter(d => d.dateStr !== dateInfo.dateStr))} 
+                                                    className="text-xs text-slate-500 hover:text-slate-300"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                            <ul className="text-sm text-slate-300 space-y-1">
+                                                {dateInfo.people.map((person, personIdx) => (
+                                                    <li key={personIdx}>• {person}</li>
+                                                ))}
+                                            </ul>
+                                        </div>
                                     ))}
-                                </ul>
+                                </div>
                             </div>
                         )}
 
