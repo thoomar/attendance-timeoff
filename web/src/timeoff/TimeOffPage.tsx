@@ -51,9 +51,11 @@ function fmtTimeLocal(iso?: string): string {
     return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 function fmtMDY(isoDate: string): string {
-    const d = new Date(isoDate);
-    if (Number.isNaN(d.getTime())) return isoDate;
-    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+    // Parse YYYY-MM-DD directly to avoid timezone conversion
+    const match = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!match) return isoDate;
+    const [, year, month, day] = match;
+    return `${month}/${day}/${year}`;
 }
 function fmtDateRange(isoDates: string[]): string {
     if (!isoDates?.length) return '';
@@ -254,8 +256,10 @@ export default function TimeOffPage() {
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                         <div className="relative h-9 w-9">
-                            <div className="absolute inset-0 rounded-xl bg-blue-600/30 blur-md"></div>
-                            <div className="relative h-full w-full rounded-xl bg-gradient-to-br from-blue-600 to-indigo-500"></div>
+                            <div className="absolute inset-0 rounded-full bg-blue-600/30 blur-md"></div>
+                            <div className="relative h-full w-full rounded-full bg-gradient-to-br from-blue-600 to-indigo-500 flex items-center justify-center text-white font-bold text-lg">
+                                T
+                            </div>
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
@@ -291,12 +295,17 @@ export default function TimeOffPage() {
                                 hasTimeOff: 'rdp-day_has_timeoff'
                             }}
                             onDayClick={(day) => {
-                                const dateStr = day.toISOString().slice(0, 10);
+                                // Get local date parts to avoid timezone issues
+                                const year = day.getFullYear();
+                                const month = String(day.getMonth() + 1).padStart(2, '0');
+                                const dayNum = String(day.getDate()).padStart(2, '0');
+                                const dateStr = `${year}-${month}-${dayNum}`;
+                                
                                 const peopleOff = calendar
                                     .filter(e => e.dates.some(d => d.startsWith(dateStr)))
                                     .map(e => e.userName);
                                 if (peopleOff.length > 0) {
-                                    setSelectedDateInfo({ date: fmtMDY(dateStr), people: peopleOff });
+                                    setSelectedDateInfo({ date: `${month}/${dayNum}/${year}`, people: peopleOff });
                                 }
                             }}
                         />
