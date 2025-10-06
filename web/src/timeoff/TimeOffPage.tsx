@@ -71,6 +71,7 @@ export default function TimeOffPage() {
     const [submitting, setSubmitting] = useState(false);
     const [pending, setPending] = useState<PendingUIItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
+    const [selectedDateInfo, setSelectedDateInfo] = useState<{ date: string; people: string[] } | null>(null);
 
     // Zoho disabled - using Microsoft O365 instead
     const zohoConnected = true;
@@ -131,8 +132,8 @@ export default function TimeOffPage() {
                 .then(r => r.json())
                 .then((raw: any) => {
                     const out: PendingUIItem[] = [];
-                    if (Array.isArray(raw)) {
-                        for (const item of raw) {
+                    if (Array.isArray(raw?.items)) {
+                        for (const item of raw.items) {
                             if (item?.id) {
                                 const range =
                                     Array.isArray(item.dates) && item.dates.length
@@ -207,10 +208,22 @@ export default function TimeOffPage() {
                 body: JSON.stringify({ decision, note: '' }),
             });
             if (!res.ok) {
-                const txt = await res.text();
-                throw new Error(txt);
+                const ct = res.headers.get('content-type') || '';
+                let msg = 'Failed to update';
+                if (ct.includes('application/json')) {
+                    try {
+                        const j = await res.json();
+                        msg = j?.error || JSON.stringify(j);
+                    } catch {
+                        msg = await res.text();
+                    }
+                } else {
+                    msg = await res.text();
+                }
+                throw new Error(msg);
             }
             setPending(p => p.filter(i => i.id !== id));
+            alert(`Request ${decision.toLowerCase()} successfully!`);
         } catch (e: any) {
             alert(e?.message || 'Failed to update');
         }
@@ -268,7 +281,39 @@ export default function TimeOffPage() {
                             onSelect={(val) => setSelected(val || [])}
                             disabled={{ before: new Date() }}
                             className="rdp"
+                            modifiers={{
+                                hasTimeOff: (date) => {
+                                    const dateStr = date.toISOString().slice(0, 10);
+                                    return calendar.some(e => e.dates.includes(dateStr));
+                                }
+                            }}
+                            modifiersClassNames={{
+                                hasTimeOff: 'rdp-day_has_timeoff'
+                            }}
+                            onDayClick={(day) => {
+                                const dateStr = day.toISOString().slice(0, 10);
+                                const peopleOff = calendar
+                                    .filter(e => e.dates.includes(dateStr))
+                                    .map(e => e.userName);
+                                if (peopleOff.length > 0) {
+                                    setSelectedDateInfo({ date: fmtMDY(dateStr), people: peopleOff });
+                                }
+                            }}
                         />
+
+                        {selectedDateInfo && (
+                            <div className="mt-4 p-4 rounded-xl border border-blue-700 bg-blue-950/30">
+                                <div className="flex items-center justify-between mb-2">
+                                    <h3 className="text-sm font-semibold">Time Off on {selectedDateInfo.date}</h3>
+                                    <button onClick={() => setSelectedDateInfo(null)} className="text-xs text-slate-400 hover:text-slate-200">Close</button>
+                                </div>
+                                <ul className="text-sm text-slate-300 space-y-1">
+                                    {selectedDateInfo.people.map((person, idx) => (
+                                        <li key={idx}>• {person}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
 
                         {isRequester && (
                             <div className="mt-4 space-y-3">

@@ -53,3 +53,17 @@ input, textarea, select {
   color: white;
 }
 .rdp-day_today { outline-color: #334155; } /* slate-700 */
+.rdp-day_has_timeoff {
+  position: relative;
+}
+.rdp-day_has_timeoff::after {
+  content: '';
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background-color: #10b981; /* emerald-500 */
+}
