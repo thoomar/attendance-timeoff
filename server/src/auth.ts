@@ -98,9 +98,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
             }
         }
 
-        // 3) Fallback
-        req.user = DEMO_USER;
-        return next();
+        // 3) No user - require authentication
+        return res.status(401).json({ error: 'Authentication required' });
     } catch (err) {
         console.error('Auth error:', err);
         return res.status(500).json({ error: 'Auth failure' });
