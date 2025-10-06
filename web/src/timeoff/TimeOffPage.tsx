@@ -80,6 +80,11 @@ export default function TimeOffPage() {
         (async () => {
             try {
                 const r = await fetch('/api/me', { credentials: 'include' });
+                if (r.status === 401) {
+                    // Not authenticated - explicitly set null to trigger login UI
+                    setUser(null);
+                    return;
+                }
                 const d = await r.json();
                 // backend returns { id, email, fullName, role }
                 const mapped: User = { id: d?.id, name: d?.fullName || d?.name || 'User', role: d?.role };
@@ -210,20 +215,17 @@ export default function TimeOffPage() {
     }
 
     // Loading states
-    if (!user) return <div className="p-6 text-sm text-slate-400">Loading…</div>;
-    if (zohoConnected === null) return <div className="p-6 text-sm text-slate-400">Checking Zoho…</div>;
-
-    if (!zohoConnected) {
+    if (!user) {
         return (
             <div className="min-h-dvh flex items-center justify-center p-6">
                 <div className="card p-8 max-w-md w-full space-y-4">
-                    <h2 className="text-lg font-semibold">Connect Zoho</h2>
-                    <p className="text-slate-400 text-sm">Please connect your Zoho account to continue.</p>
+                    <h2 className="text-lg font-semibold">Authentication Required</h2>
+                    <p className="text-slate-400 text-sm">Please sign in with your Microsoft account to continue.</p>
                     <a
-                        href={`/api/zoho/connect?returnTo=${encodeURIComponent('/time-off')}`}
-                        className="btn-primary inline-flex"
+                        href={`/api/auth/login?returnTo=${encodeURIComponent('/time-off')}`}
+                        className="btn-primary inline-flex w-full justify-center"
                     >
-                        Connect Zoho
+                        Sign in with Microsoft
                     </a>
                 </div>
             </div>
