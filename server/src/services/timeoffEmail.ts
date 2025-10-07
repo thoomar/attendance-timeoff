@@ -15,11 +15,12 @@ export type NewRequestCtx = {
 export type DecisionCtx = {
     siteUrl?: string;
     employeeName: string;
-    employeeEmail: string; // who gets the decision email
-    date: string;          // single day in 'YYYY-MM-DD'
+    employeeEmail: string;  // who gets the decision email
+    managerName: string;    // who made the decision
+    dates: string[];        // 'YYYY-MM-DD' strings
     decision: 'APPROVED' | 'REJECTED';
-    reason: string;        // optional note/explanation
-    toOverride?: string[]; // override recipients if provided
+    denialReason?: string;  // optional note/explanation for denials
+    toOverride?: string[];  // override recipients if provided
 };
 
 function getApproverEmails(): string[] {
@@ -73,14 +74,16 @@ export async function sendTimeOffEmail(
     const html = buildDecisionEmail({
         siteUrl: c.siteUrl || '',
         employeeName: c.employeeName,
-        date: c.date,
+        managerName: c.managerName,
+        dates: c.dates,
         decision: type,
-        reason: c.reason || '',
+        denialReason: c.denialReason,
     });
     const to = (c.toOverride && c.toOverride.length) ? c.toOverride : [c.employeeEmail];
+    const dateRange = c.dates.length > 1 ? `${c.dates[0]} - ${c.dates[c.dates.length - 1]}` : c.dates[0];
     await sendEmail({
         to,
-        subject: `Time-Off ${type} — ${c.employeeName} (${c.date})`,
+        subject: `Time-Off ${type} — ${dateRange}`,
         html,
         text: htmlToText(html),
     });

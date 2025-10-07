@@ -201,13 +201,29 @@ export default function TimeOffPage() {
     }
 
     // --- Approve / Deny (PATCH /api/time-off/:id) ---
-    async function decide(id: string, decision: 'APPROVED' | 'DENIED') {
+    async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
         try {
+            let note = '';
+            
+            // If denying, ask for a reason
+            if (decision === 'REJECTED') {
+                const reason = prompt('Please provide a reason for denying this request:');
+                if (reason === null) {
+                    // User cancelled
+                    return;
+                }
+                note = reason.trim();
+                if (!note) {
+                    alert('A reason is required when denying a request.');
+                    return;
+                }
+            }
+
             const res = await fetch(`/api/time-off/${encodeURIComponent(id)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'include',
-                body: JSON.stringify({ decision, note: '' }),
+                body: JSON.stringify({ decision, note }),
             });
             if (!res.ok) {
                 const ct = res.headers.get('content-type') || '';
@@ -324,7 +340,10 @@ export default function TimeOffPage() {
                             <div className="mt-4 p-4 rounded-xl border border-blue-700 bg-blue-950/30">
                                 <div className="flex items-center justify-between mb-3">
                                     <h3 className="text-sm font-semibold">Time Off Summary ({selectedDatesInfo.length} date{selectedDatesInfo.length === 1 ? '' : 's'})</h3>
-                                    <button onClick={() => setSelectedDatesInfo([])} className="text-xs text-slate-400 hover:text-slate-200">Clear All</button>
+                                    <button onClick={() => {
+                                        setSelectedDatesInfo([]);
+                                        setSelected([]);
+                                    }} className="text-xs text-slate-400 hover:text-slate-200">Clear All</button>
                                 </div>
                                 <div className="space-y-3">
                                     {selectedDatesInfo.map((dateInfo, idx) => (
@@ -438,7 +457,7 @@ export default function TimeOffPage() {
                                                 <CheckCircle2 className="h-4 w-4" />
                                                 Approve
                                             </button>
-                                            <button onClick={() => decide(p.id, 'DENIED')} className="btn">
+                                            <button onClick={() => decide(p.id, 'REJECTED')} className="btn">
                                                 Reject
                                             </button>
                                         </div>

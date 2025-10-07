@@ -21,17 +21,26 @@ export function buildNewRequestEmail(args: {
 export function buildDecisionEmail(args: {
   siteUrl: string;
   employeeName: string;
-  date: string;
+  managerName: string;
+  dates: string[];
   decision: 'APPROVED' | 'REJECTED' | string;
-  reason: string;
+  denialReason?: string;
 }) {
-  const { siteUrl, employeeName, date, decision, reason } = args;
+  const { siteUrl, employeeName, managerName, dates, decision, denialReason } = args;
+  const range = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]}` : dates[0];
+  const isApproved = decision === 'APPROVED';
+  
   return `
   <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; line-height:1.5;">
     <h2>Time-Off ${escapeHtml(String(decision))}</h2>
     <p>Hi ${escapeHtml(employeeName)},</p>
-    <p>Your time-off request for <strong>${escapeHtml(date)}</strong> was <strong>${escapeHtml(String(decision).toLowerCase())}</strong>.</p>
-    <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+    ${isApproved 
+      ? `<p><strong>${escapeHtml(managerName)}</strong> has approved your request for the following days:</p>
+         <p style="margin-left: 20px;"><strong>${escapeHtml(range)}</strong></p>`
+      : `<p><strong>${escapeHtml(managerName)}</strong> has denied your request for the following days${denialReason ? ' due to:' : ':'}</p>
+         <p style="margin-left: 20px;"><strong>${escapeHtml(range)}</strong></p>
+         ${denialReason ? `<p style="margin-left: 20px; font-style: italic;">"${escapeHtml(denialReason)}"</p>` : ''}`
+    }
     ${siteUrl ? `<p><a href="${siteUrl}" target="_blank" rel="noopener">Open Attendance Tracker</a></p>` : ''}
   </div>
   `;

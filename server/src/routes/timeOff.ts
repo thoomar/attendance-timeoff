@@ -185,7 +185,29 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
+        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
+        // Get request details before updating
+        const requestQuery = await db.query<{ 
+            user_id: string; 
+            dates: string[]; 
+            user_name: string; 
+            user_email: string;
+        }>(
+            `
+                SELECT r.user_id, r.dates, u.full_name AS user_name, u.email AS user_email
+                FROM time_off_requests r
+                LEFT JOIN users u ON u.id = r.user_id
+                WHERE r.id = $1
+            `,
+            [id],
+        );
+
+        if (!requestQuery.rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
+        const requestData = requestQuery.rows[0];
+
+        // Update the request
         const { rows } = await db.query(
             `
                 UPDATE time_off_requests
@@ -200,6 +222,23 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
+
+        // Send email notification
+        try {
+            const emailType = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
+            await sendTimeOffEmail(emailType, {
+                siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
+                employeeName: requestData.user_name || requestData.user_email,
+                employeeEmail: requestData.user_email,
+                managerName: sessUser.name || sessUser.email,
+                dates: requestData.dates || [],
+                decision: body.decision,
+                denialReason: body.decision === 'REJECTED' ? body.note || undefined : undefined,
+            });
+        } catch (e) {
+            console.warn('[email] Decision notification send failed:', e);
+        }
+
         return res.json({ ok: true });
     } catch (e: any) {
         console.error('[time-off][decision:patch] error:', e?.stack || e);
@@ -212,7 +251,29 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
+        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
+        // Get request details before updating
+        const requestQuery = await db.query<{ 
+            user_id: string; 
+            dates: string[]; 
+            user_name: string; 
+            user_email: string;
+        }>(
+            `
+                SELECT r.user_id, r.dates, u.full_name AS user_name, u.email AS user_email
+                FROM time_off_requests r
+                LEFT JOIN users u ON u.id = r.user_id
+                WHERE r.id = $1
+            `,
+            [id],
+        );
+
+        if (!requestQuery.rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
+        const requestData = requestQuery.rows[0];
+
+        // Update the request
         const { rows } = await db.query(
             `
                 UPDATE time_off_requests
@@ -227,6 +288,23 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
+
+        // Send email notification
+        try {
+            const emailType = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
+            await sendTimeOffEmail(emailType, {
+                siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
+                employeeName: requestData.user_name || requestData.user_email,
+                employeeEmail: requestData.user_email,
+                managerName: sessUser.name || sessUser.email,
+                dates: requestData.dates || [],
+                decision: body.decision,
+                denialReason: body.decision === 'REJECTED' ? body.note || undefined : undefined,
+            });
+        } catch (e) {
+            console.warn('[email] Decision notification send failed:', e);
+        }
+
         return res.json({ ok: true });
     } catch (e: any) {
         console.error('[time-off][decision:post] error:', e?.stack || e);
