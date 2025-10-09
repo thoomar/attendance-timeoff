@@ -69,8 +69,8 @@ h1 {
 .btn-primary {
   background: var(--primary-gold);
   border: 1px solid var(--primary-gold);
-  color: var(--bg-dark);
-  font-weight: 600;
+  color: #000 !important;
+  font-weight: 700;
   box-shadow: 0 4px 12px rgba(255, 215, 0, 0.3);
 }
 
@@ -78,6 +78,10 @@ h1 {
   background: var(--dark-gold);
   box-shadow: 0 6px 16px rgba(255, 215, 0, 0.5);
   transform: translateY(-2px);
+}
+
+.btn-primary svg {
+  color: #000;
 }
 
 input, textarea, select {
