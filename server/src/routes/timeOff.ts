@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { requireAuth } from '../auth/entra';
+import { requireAuth } from '../auth';
 import * as db from '../db';
 import { sendTimeOffEmail } from '../services/timeoffEmail';
 
