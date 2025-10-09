@@ -84,8 +84,8 @@ app.use(
         }),
         cookie: {
             httpOnly: true,
-            // Use None+Secure so cookies always survive OAuth redirects
-            sameSite: 'none',
+            // Use Lax for better compatibility (same-site redirects OK)
+            sameSite: 'lax',
             secure: true,
             domain: IS_PROD ? COOKIE_DOMAIN : undefined,
             path: '/',
