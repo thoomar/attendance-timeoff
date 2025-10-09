@@ -355,8 +355,8 @@ export default function TimeOffPage() {
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                         <div className="relative h-9 w-9">
-                            <div className="absolute inset-0 rounded-full bg-blue-600/30 blur-md"></div>
-                            <div className="relative h-full w-full rounded-full bg-gradient-to-br from-blue-600 to-indigo-500 flex items-center justify-center text-white font-bold text-lg">
+                            <div className="absolute inset-0 rounded-full bg-yellow-500/30 blur-md"></div>
+                            <div className="relative h-full w-full rounded-full bg-gradient-to-br from-yellow-500 to-yellow-600 flex items-center justify-center text-black font-bold text-lg">
                                 T
                             </div>
                         </div>
@@ -387,7 +387,7 @@ export default function TimeOffPage() {
                     {/* LEFT */}
                     <section className="card p-6">
                         <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
-                            <CalendarDays className="h-5 w-5 text-blue-400" />
+                            <CalendarDays className="h-5 w-5 text-yellow-500" />
                             {['Manager', 'Admin'].includes(user.role) ? 'Manager Calendar' : 'Team Calendar'}
                         </h2>
 
@@ -433,7 +433,7 @@ export default function TimeOffPage() {
                         />
 
                         {selectedDatesInfo.length > 0 && (
-                            <div className="mt-4 p-4 rounded-xl border border-blue-700 bg-blue-950/30">
+                            <div className="mt-4 p-4 rounded-xl border border-yellow-600 bg-yellow-950/30">
                                 <div className="flex items-center justify-between mb-3">
                                     <h3 className="text-sm font-semibold">Time Off Summary ({selectedDatesInfo.length} date{selectedDatesInfo.length === 1 ? '' : 's'})</h3>
                                     <button onClick={() => {
@@ -445,7 +445,7 @@ export default function TimeOffPage() {
                                     {selectedDatesInfo.map((dateInfo, idx) => (
                                         <div key={idx} className="border-b border-slate-700 pb-2 last:border-0 last:pb-0">
                                             <div className="flex items-center justify-between mb-1">
-                                                <h4 className="text-xs font-semibold text-blue-400">{dateInfo.date}</h4>
+                                                <h4 className="text-xs font-semibold text-yellow-500">{dateInfo.date}</h4>
                                                 <button 
                                                     onClick={() => setSelectedDatesInfo(prev => prev.filter(d => d.dateStr !== dateInfo.dateStr))} 
                                                     className="text-xs text-slate-500 hover:text-slate-300"
@@ -567,7 +567,7 @@ export default function TimeOffPage() {
                 {/* My Requests section for all users */}
                 <section className="card p-6 mt-6">
                     <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
-                        <Clock className="h-5 w-5 text-blue-400" /> My Requests
+                        <Clock className="h-5 w-5 text-yellow-500" /> My Requests
                     </h2>
 
                     {myRequests.length === 0 ? (
