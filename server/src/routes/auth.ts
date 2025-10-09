@@ -80,7 +80,7 @@ router.get('/login', async (req: Request, res: Response) => {
 });
 
 /** OAuth callback – exchange code, store session user, redirect to app */
-router.get('/callback/azure', async (req: Request, res: Response) => {
+router.get('/callback', async (req: Request, res: Response) => {
     try {
         console.log('[CALLBACK] Session ID:', req.sessionID);
         console.log('[CALLBACK] Has session.oidc:', !!req.session.oidc);
