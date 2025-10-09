@@ -1,12 +1,26 @@
+// Helper to format dates properly
+function formatDate(d: string | Date): string {
+  if (typeof d === 'string') {
+    // Already a string, ensure it's YYYY-MM-DD format
+    return d.slice(0, 10);
+  }
+  // Date object - convert to YYYY-MM-DD
+  const date = new Date(d);
+  return date.toISOString().slice(0, 10);
+}
+
 export function buildNewRequestEmail(args: {
   siteUrl: string;
   employeeName: string;
   employeeEmail: string;
   reason: string;
-  dates: string[];
+  dates: (string | Date)[];
 }) {
   const { siteUrl, employeeName, employeeEmail, reason, dates } = args;
-  const range = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]}` : dates[0];
+  const formattedDates = dates.map(formatDate);
+  const range = formattedDates.length > 1 
+    ? `${formattedDates[0]} → ${formattedDates[formattedDates.length - 1]}` 
+    : formattedDates[0];
   return `
   <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; line-height:1.5;">
     <h2>New Time-Off Request</h2>
@@ -22,12 +36,15 @@ export function buildDecisionEmail(args: {
   siteUrl: string;
   employeeName: string;
   managerName: string;
-  dates: string[];
+  dates: (string | Date)[];
   decision: 'APPROVED' | 'REJECTED' | string;
   denialReason?: string;
 }) {
   const { siteUrl, employeeName, managerName, dates, decision, denialReason } = args;
-  const range = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]}` : dates[0];
+  const formattedDates = dates.map(formatDate);
+  const range = formattedDates.length > 1 
+    ? `${formattedDates[0]} → ${formattedDates[formattedDates.length - 1]}` 
+    : formattedDates[0];
   const isApproved = decision === 'APPROVED';
   
   return `
