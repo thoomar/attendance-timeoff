@@ -185,7 +185,7 @@ export default function TimeOffPage() {
     // --- Load my requests (all users) ---
     useEffect(() => {
         if (!user) return;
-        fetch('/api/time-off/mine', { credentials: 'include' })
+        fetch('/api/time-off/mine', { headers: getAuthHeaders() })
             .then(r => r.json())
             .then((raw: any) => {
                 const out: MyRequestItem[] = [];
