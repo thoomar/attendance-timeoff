@@ -51,10 +51,11 @@ router.get('/login', async (req: Request, res: Response) => {
         const code_challenge = generators.codeChallenge(code_verifier);
 
         // Store OIDC state in database (bypasses cookie issues)
+        const oidcData = JSON.stringify({ state, code_verifier });
         await query(
-            `INSERT INTO session (sid, sess, expire) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')
-             ON CONFLICT (sid) DO UPDATE SET sess = $2, expire = NOW() + INTERVAL '10 minutes'`,
-            [`oidc:${state}`, JSON.stringify({ state, code_verifier })]
+            `INSERT INTO session (sid, sess, expire) VALUES ($1, $2::json, NOW() + INTERVAL '10 minutes')
+             ON CONFLICT (sid) DO UPDATE SET sess = $2::json, expire = NOW() + INTERVAL '10 minutes'`,
+            [`oidc:${state}`, oidcData]
         );
         console.log('[LOGIN] OIDC state stored in DB:', state.substring(0, 8));
 
@@ -83,7 +84,7 @@ router.get('/callback', async (req: Request, res: Response) => {
         }
 
         // Look up OIDC state from database
-        const { rows } = await query<{ sess: string }>(
+        const { rows } = await query<{ sess: any }>(
             'SELECT sess FROM session WHERE sid = $1 AND expire > NOW()',
             [`oidc:${params.state}`]
         );
@@ -95,10 +96,11 @@ router.get('/callback', async (req: Request, res: Response) => {
             );
         }
 
-        const { state, code_verifier } = JSON.parse(rows[0].sess) as {
-            state: string;
-            code_verifier: string;
-        };
+        // Parse sess - might be already an object or a string
+        const sessData = rows[0].sess;
+        const { state, code_verifier } = typeof sessData === 'string' 
+            ? JSON.parse(sessData) 
+            : sessData;
 
         // Delete the temporary OIDC state
         await query('DELETE FROM session WHERE sid = $1', [`oidc:${params.state}`]);
