@@ -117,7 +117,7 @@ router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, re
         try {
             await sendTimeOffEmail('NEW_REQUEST', {
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
-                employeeName: sessUser.name || sessUser.email,
+                employeeName: sessUser.fullName || sessUser.email,
                 employeeEmail: sessUser.email,
                 reason,
                 dates,
@@ -234,7 +234,7 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
                 employeeName: requestData.user_name || requestData.user_email,
                 employeeEmail: requestData.user_email,
-                managerName: sessUser.name || sessUser.email,
+                managerName: sessUser.fullName || sessUser.email,
                 dates: requestData.dates || [],
                 decision: normalizedDecision,
                 denialReason: normalizedDecision === 'REJECTED' ? body.note || undefined : undefined,
@@ -303,7 +303,7 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
                 employeeName: requestData.user_name || requestData.user_email,
                 employeeEmail: requestData.user_email,
-                managerName: sessUser.name || sessUser.email,
+                managerName: sessUser.fullName || sessUser.email,
                 dates: requestData.dates || [],
                 decision: normalizedDecision,
                 denialReason: normalizedDecision === 'REJECTED' ? body.note || undefined : undefined,
