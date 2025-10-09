@@ -30,7 +30,7 @@ const CreateReq = z.object({
 });
 
 const DecisionReq = z.object({
-    decision: z.enum(['APPROVED', 'REJECTED']),
+    decision: z.enum(['APPROVED', 'REJECTED', 'DENIED']),
     note: z.string().max(2000).optional(),
 });
 
@@ -144,6 +144,7 @@ router.get('/mine', requireAuth, async (req: Request, res: Response) => {
         const { rows } = await db.query(
             `
                 SELECT r.id, r.user_id, r.dates, r.reason, r.status, r.created_at,
+                       r.decided_at, r.decision_note,
                        u.full_name AS user_name, u.email AS user_email
                 FROM time_off_requests r
                          LEFT JOIN users u ON u.id = r.user_id
@@ -188,6 +189,9 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
         const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
+        // Normalize DENIED to REJECTED for database consistency
+        const normalizedDecision = body.decision === 'DENIED' ? 'REJECTED' : body.decision;
+
         // Get request details before updating
         const requestQuery = await db.query<{ 
             user_id: string; 
@@ -218,22 +222,22 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
                 WHERE id = $1
                     RETURNING id
             `,
-            [id, body.decision, body.note ?? null],
+            [id, normalizedDecision, body.note ?? null],
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
 
         // Send email notification
         try {
-            const emailType = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
+            const emailType = normalizedDecision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
             await sendTimeOffEmail(emailType, {
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
                 employeeName: requestData.user_name || requestData.user_email,
                 employeeEmail: requestData.user_email,
                 managerName: sessUser.name || sessUser.email,
                 dates: requestData.dates || [],
-                decision: body.decision,
-                denialReason: body.decision === 'REJECTED' ? body.note || undefined : undefined,
+                decision: normalizedDecision,
+                denialReason: normalizedDecision === 'REJECTED' ? body.note || undefined : undefined,
             });
         } catch (e) {
             console.warn('[email] Decision notification send failed:', e);
@@ -254,6 +258,9 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
         const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
+        // Normalize DENIED to REJECTED for database consistency
+        const normalizedDecision = body.decision === 'DENIED' ? 'REJECTED' : body.decision;
+
         // Get request details before updating
         const requestQuery = await db.query<{ 
             user_id: string; 
@@ -284,22 +291,22 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
                 WHERE id = $1
                     RETURNING id
             `,
-            [id, body.decision, body.note ?? null],
+            [id, normalizedDecision, body.note ?? null],
         );
 
         if (!rows?.length) return res.status(404).json({ ok: false, error: 'not found' });
 
         // Send email notification
         try {
-            const emailType = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
+            const emailType = normalizedDecision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
             await sendTimeOffEmail(emailType, {
                 siteUrl: process.env.APP_BASE_URL || process.env.BASE_URL || 'https://timeoff.timesharehelpcenter.com',
                 employeeName: requestData.user_name || requestData.user_email,
                 employeeEmail: requestData.user_email,
                 managerName: sessUser.name || sessUser.email,
                 dates: requestData.dates || [],
-                decision: body.decision,
-                denialReason: body.decision === 'REJECTED' ? body.note || undefined : undefined,
+                decision: normalizedDecision,
+                denialReason: normalizedDecision === 'REJECTED' ? body.note || undefined : undefined,
             });
         } catch (e) {
             console.warn('[email] Decision notification send failed:', e);
@@ -321,7 +328,7 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
         const { rows } = await db.query(
             `
                 SELECT r.id, r.user_id, u.full_name AS user_name, u.email AS user_email,
-                       r.dates, r.status, r.reason
+                       r.dates, r.status, r.created_at
                 FROM time_off_requests r
                          LEFT JOIN users u ON u.id = r.user_id
                 WHERE EXISTS (
@@ -338,8 +345,8 @@ router.get('/calendar', requireAuth, async (req: Request, res: Response) => {
             userId: r.user_id,
             name: r.user_name || r.user_email,
             status: r.status,
-            reason: r.reason,
             dates: r.dates as string[],
+            created_at: r.created_at,
         }));
 
         return res.json({ ok: true, entries });

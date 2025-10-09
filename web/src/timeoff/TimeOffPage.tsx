@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { z } from 'zod';
-import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock } from 'lucide-react';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
@@ -25,6 +25,17 @@ type PendingUIItem = {
     date: string;                    // "YYYY-MM-DD" or range
     reason: string;
     submittedAt?: string;            // ISO
+};
+
+// User's own request item
+type MyRequestItem = {
+    id: string;
+    date: string;                    // "YYYY-MM-DD" or range
+    reason: string;
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    submittedAt?: string;            // ISO
+    decidedAt?: string;              // ISO
+    decisionNote?: string;           // Denial reason from manager/admin
 };
 
 /** ----------------- Helpers for the Zoho loop fix ----------------- */
@@ -72,6 +83,7 @@ export default function TimeOffPage() {
     const [reason, setReason] = useState('');
     const [submitting, setSubmitting] = useState(false);
     const [pending, setPending] = useState<PendingUIItem[]>([]);
+    const [myRequests, setMyRequests] = useState<MyRequestItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
     const [selectedDatesInfo, setSelectedDatesInfo] = useState<Array<{ date: string; dateStr: string; people: string[] }>>([]);
 
@@ -158,6 +170,37 @@ export default function TimeOffPage() {
         }
     }, [user]);
 
+    // --- Load my requests (all users) ---
+    useEffect(() => {
+        if (!user) return;
+        fetch('/api/time-off/mine', { credentials: 'include' })
+            .then(r => r.json())
+            .then((raw: any) => {
+                const out: MyRequestItem[] = [];
+                if (Array.isArray(raw?.items)) {
+                    for (const item of raw.items) {
+                        if (item?.id) {
+                            const range =
+                                Array.isArray(item.dates) && item.dates.length
+                                    ? fmtDateRange(item.dates)
+                                    : '—';
+                            out.push({
+                                id: item.id,
+                                date: range,
+                                reason: item.reason ?? '',
+                                status: item.status ?? 'PENDING',
+                                submittedAt: item.created_at,
+                                decidedAt: item.decided_at,
+                                decisionNote: item.decision_note,
+                            });
+                        }
+                    }
+                }
+                setMyRequests(out);
+            })
+            .catch(() => setMyRequests([]));
+    }, [user]);
+
     const isRequester = useMemo(() => !['Manager', 'Admin'].includes(user?.role || ''), [user]);
 
     // --- Create request ---
@@ -193,6 +236,30 @@ export default function TimeOffPage() {
             setSelected([]);
             setReason('');
             alert('Request submitted!');
+            // Reload user's requests
+            fetch('/api/time-off/mine', { credentials: 'include' })
+                .then(r => r.json())
+                .then((raw: any) => {
+                    const out: MyRequestItem[] = [];
+                    if (Array.isArray(raw?.items)) {
+                        for (const item of raw.items) {
+                            if (item?.id) {
+                                const range = Array.isArray(item.dates) && item.dates.length ? fmtDateRange(item.dates) : '—';
+                                out.push({
+                                    id: item.id,
+                                    date: range,
+                                    reason: item.reason ?? '',
+                                    status: item.status ?? 'PENDING',
+                                    submittedAt: item.created_at,
+                                    decidedAt: item.decided_at,
+                                    decisionNote: item.decision_note,
+                                });
+                            }
+                        }
+                    }
+                    setMyRequests(out);
+                })
+                .catch(() => {});
         } catch (e: any) {
             alert(e?.message || 'Failed to submit');
         } finally {
@@ -467,6 +534,54 @@ export default function TimeOffPage() {
                         )}
                     </section>
                 )}
+
+                {/* My Requests section for all users */}
+                <section className="card p-6 mt-6">
+                    <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
+                        <Clock className="h-5 w-5 text-blue-400" /> My Requests
+                    </h2>
+
+                    {myRequests.length === 0 ? (
+                        <div className="text-sm text-slate-400">You haven't submitted any requests yet.</div>
+                    ) : (
+                        <ul className="space-y-3">
+                            {myRequests.map(req => {
+                                const statusColor = req.status === 'APPROVED' ? 'text-emerald-400 bg-emerald-950/30 border-emerald-700' : 
+                                                   req.status === 'REJECTED' ? 'text-red-400 bg-red-950/30 border-red-700' : 
+                                                   'text-amber-400 bg-amber-950/30 border-amber-700';
+                                return (
+                                    <li key={req.id} className="rounded-xl border border-slate-800 p-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`px-2 py-1 rounded-md text-xs font-semibold border ${statusColor}`}>
+                                                    {req.status}
+                                                </span>
+                                                <span className="text-sm font-semibold text-slate-300">{req.date}</span>
+                                            </div>
+                                            <div className="text-xs text-slate-400">
+                                                {req.submittedAt ? `Submitted: ${fmtTimeLocal(req.submittedAt)}` : ''}
+                                            </div>
+                                        </div>
+                                        <div className="text-sm text-slate-200">
+                                            <span className="text-slate-400">Reason:</span> {req.reason || '—'}
+                                        </div>
+                                        {req.status === 'REJECTED' && req.decisionNote && (
+                                            <div className="mt-2 p-3 rounded-lg bg-red-950/50 border border-red-800">
+                                                <div className="text-xs font-semibold text-red-400 mb-1">Denial Reason:</div>
+                                                <div className="text-sm text-slate-300">{req.decisionNote}</div>
+                                            </div>
+                                        )}
+                                        {req.decidedAt && (
+                                            <div className="text-xs text-slate-500 mt-1">
+                                                Decided: {fmtTimeLocal(req.decidedAt)}
+                                            </div>
+                                        )}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    )}
+                </section>
             </main>
         </div>
     );
