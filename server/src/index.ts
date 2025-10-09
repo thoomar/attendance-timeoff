@@ -33,7 +33,8 @@ const {
 if (!SESSION_SECRET) throw new Error('SESSION_SECRET is required');
 
 const IS_PROD = NODE_ENV === 'production';
-const COOKIE_DOMAIN = '.timesharehelpcenter.com';
+// Don't set domain - let browser use the request domain (more secure and compatible)
+const COOKIE_DOMAIN = undefined;
 
 const PgStore = connectPgSimple(session);
 const pgConnString =
