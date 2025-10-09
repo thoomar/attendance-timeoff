@@ -1,6 +1,7 @@
 // src/routes/auth.ts
 import { Router, Request, Response } from 'express';
 import { Issuer, generators, Client } from 'openid-client';
+import { query } from '../db';
 
 const {
     // Prefer ENTRA_* but fall back to AZURE_* if those are set
@@ -49,21 +50,13 @@ router.get('/login', async (req: Request, res: Response) => {
         const code_verifier = generators.codeVerifier();
         const code_challenge = generators.codeChallenge(code_verifier);
 
-        // Save CSRF + PKCE verifier in the session
-        req.session.oidc = { state, code_verifier };
-
-        // Force session save before redirect
-        await new Promise<void>((resolve, reject) => {
-            req.session.save((err) => {
-                if (err) {
-                    console.error('[LOGIN] Session save error:', err);
-                    reject(err);
-                } else {
-                    console.log('[LOGIN] Session saved with state:', state.substring(0, 8));
-                    resolve();
-                }
-            });
-        });
+        // Store OIDC state in database (bypasses cookie issues)
+        await query(
+            `INSERT INTO session (sid, sess, expire) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')
+             ON CONFLICT (sid) DO UPDATE SET sess = $2, expire = NOW() + INTERVAL '10 minutes'`,
+            [`oidc:${state}`, JSON.stringify({ state, code_verifier })]
+        );
+        console.log('[LOGIN] OIDC state stored in DB:', state.substring(0, 8));
 
         const authUrl = client.authorizationUrl({
             scope: ENTRA_SCOPES,
@@ -82,25 +75,34 @@ router.get('/login', async (req: Request, res: Response) => {
 /** OAuth callback – exchange code, store session user, redirect to app */
 router.get('/callback', async (req: Request, res: Response) => {
     try {
-        console.log('[CALLBACK] Session ID:', req.sessionID);
-        console.log('[CALLBACK] Has session.oidc:', !!req.session.oidc);
-        
         const client = await getClient();
         const params = client.callbackParams(req);
 
-        const { state, code_verifier } = (req.session.oidc || {}) as {
-            state?: string;
-            code_verifier?: string;
-        };
+        if (!params.state) {
+            return res.status(400).send('Missing state parameter.');
+        }
 
-        if (!state || !code_verifier) {
-            console.error('[CALLBACK] Missing OIDC state or code_verifier in session');
-            console.error('[CALLBACK] Session keys:', Object.keys(req.session));
-            console.error('[CALLBACK] Incoming state param:', params.state?.substring(0, 8));
+        // Look up OIDC state from database
+        const { rows } = await query<{ sess: string }>(
+            'SELECT sess FROM session WHERE sid = $1 AND expire > NOW()',
+            [`oidc:${params.state}`]
+        );
+
+        if (!rows.length) {
+            console.error('[CALLBACK] OIDC state not found or expired:', params.state.substring(0, 8));
             return res.status(400).send(
                 'Session expired or invalid. Please <a href="/api/auth/login">try logging in again</a>.'
             );
         }
+
+        const { state, code_verifier } = JSON.parse(rows[0].sess) as {
+            state: string;
+            code_verifier: string;
+        };
+
+        // Delete the temporary OIDC state
+        await query('DELETE FROM session WHERE sid = $1', [`oidc:${params.state}`]);
+        console.log('[CALLBACK] Retrieved OIDC state from DB:', state.substring(0, 8));
 
         const tokenSet = await client.callback(ENTRA_REDIRECT_URI!, params, {
             state,
@@ -122,7 +124,6 @@ router.get('/callback', async (req: Request, res: Response) => {
         };
 
         (req.session as any).user = userPayload;
-        delete (req.session as any).oidc;
 
         // Force session save before redirect
         await new Promise<void>((resolve, reject) => {
