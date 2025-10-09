@@ -2,6 +2,7 @@
 import { Router, Request, Response } from 'express';
 import { Issuer, generators, Client } from 'openid-client';
 import { query } from '../db';
+import { signToken } from '../auth/jwt';
 
 const {
     // Prefer ENTRA_* but fall back to AZURE_* if those are set
@@ -123,27 +124,15 @@ router.get('/callback', async (req: Request, res: Response) => {
             email,
             fullName: (claims.name as string) || email || 'Unknown',
             role: 'Enrollment Specialist' as const,
+            managerUserId: null,
         };
 
-        (req.session as any).user = userPayload;
-
-        // Force session save before redirect
-        await new Promise<void>((resolve, reject) => {
-            req.session.save((err) => {
-                if (err) {
-                    console.error('[CALLBACK] Session save error:', err);
-                    reject(err);
-                } else {
-                    console.log('[CALLBACK] User session saved:', email);
-                    resolve();
-                }
-            });
-        });
-
-        // Small delay to ensure cookie header is sent before redirect
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Generate JWT token (bypasses all cookie issues)
+        const token = signToken(userPayload);
+        console.log('[CALLBACK] JWT generated for:', email);
         
-        return res.redirect(APP_BASE_URL);
+        // Redirect with token as query parameter for frontend to capture
+        return res.redirect(`${APP_BASE_URL}?token=${token}`);
     } catch (err) {
         console.error('[ENTRA CALLBACK ERROR]', err);
         return res.status(500).send('Login failed. Please try again.');

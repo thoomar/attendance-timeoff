@@ -3,6 +3,7 @@ import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { z } from 'zod';
 import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock } from 'lucide-react';
+import { getAuthHeaders, captureTokenFromURL, clearToken } from '../auth/token';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
@@ -90,13 +91,21 @@ export default function TimeOffPage() {
     // Zoho disabled - using Microsoft O365 instead
     const zohoConnected = true;
 
+    // Capture JWT token from URL if present (after OAuth redirect)
+    useEffect(() => {
+        captureTokenFromURL();
+    }, []);
+
     // --- Load current user ---
     useEffect(() => {
         (async () => {
             try {
-                const r = await fetch('/api/me', { credentials: 'include' });
+                const r = await fetch('/api/me', { 
+                    headers: getAuthHeaders(),
+                });
                 if (r.status === 401) {
                     // Not authenticated - explicitly set null to trigger login UI
+                    clearToken(); // Clear any invalid token
                     setUser(null);
                     return;
                 }
@@ -119,7 +128,7 @@ export default function TimeOffPage() {
         to.setMonth(to.getMonth() + 2);
         const qs = `from=${from.toISOString().slice(0, 10)}&to=${to.toISOString().slice(0, 10)}`;
 
-        fetch(`/api/time-off/calendar?${qs}`, { credentials: 'include' })
+        fetch(`/api/time-off/calendar?${qs}`, { headers: getAuthHeaders() })
             .then(r => r.json())
             .then((d: any) => {
                 const entries: CalendarEntry[] = Array.isArray(d?.entries)
@@ -142,7 +151,7 @@ export default function TimeOffPage() {
     useEffect(() => {
         if (!user) return;
         if (user.role === 'Manager' || user.role === 'Admin') {
-            fetch('/api/time-off/pending', { credentials: 'include' })
+            fetch('/api/time-off/pending', { headers: getAuthHeaders() })
                 .then(r => r.json())
                 .then((raw: any) => {
                     const out: PendingUIItem[] = [];
@@ -212,8 +221,10 @@ export default function TimeOffPage() {
 
             const res = await fetch('/api/time-off/requests', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    ...getAuthHeaders(),
+                },
                 body: JSON.stringify(body),
             });
 
@@ -237,7 +248,7 @@ export default function TimeOffPage() {
             setReason('');
             alert('Request submitted!');
             // Reload user's requests
-            fetch('/api/time-off/mine', { credentials: 'include' })
+            fetch('/api/time-off/mine', { headers: getAuthHeaders() })
                 .then(r => r.json())
                 .then((raw: any) => {
                     const out: MyRequestItem[] = [];
@@ -288,8 +299,10 @@ export default function TimeOffPage() {
 
             const res = await fetch(`/api/time-off/${encodeURIComponent(id)}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    ...getAuthHeaders(),
+                },
                 body: JSON.stringify({ decision, note }),
             });
             if (!res.ok) {

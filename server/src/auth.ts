@@ -1,6 +1,7 @@
 // server/src/auth.ts
 import { Request, Response, NextFunction } from 'express';
 import * as db from './db'; // adjust if your db.ts path differs
+import { verifyToken } from './auth/jwt';
 
 // Keep type wide enough for your DB check constraint
 export type Role =
@@ -75,20 +76,31 @@ async function getUserByEmail(email: string): Promise<Express.User | null> {
 
 /**
  * requireAuth precedence:
- * 1) x-dev-user (explicit dev/testing override)
- * 2) x-auth-email -> DB lookup (production path using your users table)
- * 3) fallback demo user (what you currently see)
+ * 1) JWT Bearer token (primary auth method)
+ * 2) x-dev-user (explicit dev/testing override)
+ * 3) x-auth-email -> DB lookup (legacy fallback)
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
     try {
-        // 1) Dev override
+        // 1) JWT Bearer token
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            const token = authHeader.substring(7);
+            const payload = verifyToken(token);
+            if (payload) {
+                req.user = payload;
+                return next();
+            }
+        }
+
+        // 2) Dev override
         const dev = parseDevUserHeader(req);
         if (dev) {
             req.user = dev;
             return next();
         }
 
-        // 2) DB-backed auth via x-auth-email
+        // 3) DB-backed auth via x-auth-email (legacy)
         const authEmail = req.header('x-auth-email');
         if (authEmail) {
             const dbUser = await getUserByEmail(authEmail);
@@ -98,7 +110,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
             }
         }
 
-        // 3) No user - require authentication
+        // 4) No user - require authentication
         return res.status(401).json({ error: 'Authentication required' });
     } catch (err) {
         console.error('Auth error:', err);
