@@ -42,35 +42,65 @@ const router = Router();
 
 /** Start login (PKCE) */
 router.get('/login', async (req: Request, res: Response) => {
-    const client = await getClient();
+    try {
+        const client = await getClient();
 
-    const state = generators.state();
-    const code_verifier = generators.codeVerifier();
-    const code_challenge = generators.codeChallenge(code_verifier);
+        const state = generators.state();
+        const code_verifier = generators.codeVerifier();
+        const code_challenge = generators.codeChallenge(code_verifier);
 
-    // Save CSRF + PKCE verifier in the session
-    req.session.oidc = { state, code_verifier };
+        // Save CSRF + PKCE verifier in the session
+        req.session.oidc = { state, code_verifier };
 
-    const authUrl = client.authorizationUrl({
-        scope: ENTRA_SCOPES,
-        state,
-        code_challenge,
-        code_challenge_method: 'S256',
-    });
+        // Force session save before redirect
+        await new Promise<void>((resolve, reject) => {
+            req.session.save((err) => {
+                if (err) {
+                    console.error('[LOGIN] Session save error:', err);
+                    reject(err);
+                } else {
+                    console.log('[LOGIN] Session saved with state:', state.substring(0, 8));
+                    resolve();
+                }
+            });
+        });
 
-    return res.redirect(authUrl);
+        const authUrl = client.authorizationUrl({
+            scope: ENTRA_SCOPES,
+            state,
+            code_challenge,
+            code_challenge_method: 'S256',
+        });
+
+        return res.redirect(authUrl);
+    } catch (err) {
+        console.error('[LOGIN] Error:', err);
+        return res.status(500).send('Login initialization failed.');
+    }
 });
 
 /** OAuth callback – exchange code, store session user, redirect to app */
 router.get('/callback/azure', async (req: Request, res: Response) => {
     try {
+        console.log('[CALLBACK] Session ID:', req.sessionID);
+        console.log('[CALLBACK] Has session.oidc:', !!req.session.oidc);
+        
         const client = await getClient();
         const params = client.callbackParams(req);
 
         const { state, code_verifier } = (req.session.oidc || {}) as {
-            state: string;
-            code_verifier: string;
+            state?: string;
+            code_verifier?: string;
         };
+
+        if (!state || !code_verifier) {
+            console.error('[CALLBACK] Missing OIDC state or code_verifier in session');
+            console.error('[CALLBACK] Session keys:', Object.keys(req.session));
+            console.error('[CALLBACK] Incoming state param:', params.state?.substring(0, 8));
+            return res.status(400).send(
+                'Session expired or invalid. Please <a href="/api/auth/login">try logging in again</a>.'
+            );
+        }
 
         const tokenSet = await client.callback(ENTRA_REDIRECT_URI!, params, {
             state,
@@ -94,10 +124,23 @@ router.get('/callback/azure', async (req: Request, res: Response) => {
         (req.session as any).user = userPayload;
         delete (req.session as any).oidc;
 
+        // Force session save before redirect
+        await new Promise<void>((resolve, reject) => {
+            req.session.save((err) => {
+                if (err) {
+                    console.error('[CALLBACK] Session save error:', err);
+                    reject(err);
+                } else {
+                    console.log('[CALLBACK] User session saved:', email);
+                    resolve();
+                }
+            });
+        });
+
         return res.redirect(APP_BASE_URL);
     } catch (err) {
         console.error('[ENTRA CALLBACK ERROR]', err);
-        return res.status(500).send('Login failed.');
+        return res.status(500).send('Login failed. Please try again.');
     }
 });
 
