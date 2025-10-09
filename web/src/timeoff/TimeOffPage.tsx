@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { z } from 'zod';
-import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock, LogOut } from 'lucide-react';
 import { getAuthHeaders, captureTokenFromURL, clearToken } from '../auth/token';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
@@ -362,9 +362,22 @@ export default function TimeOffPage() {
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
-                    <span className="text-xs text-slate-400">
-            Signed in as {user.name}
-          </span>
+                    <div className="flex items-center gap-3">
+                        <span className="text-xs text-slate-400">
+                            Signed in as {user.name}
+                        </span>
+                        <button
+                            onClick={() => {
+                                clearToken();
+                                window.location.href = '/api/auth/login';
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded-md transition-colors"
+                            title="Logout"
+                        >
+                            <LogOut size={14} />
+                            Logout
+                        </button>
+                    </div>
                 </div>
             </header>
 
