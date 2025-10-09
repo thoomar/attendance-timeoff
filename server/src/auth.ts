@@ -86,10 +86,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         const authHeader = req.headers.authorization;
         if (authHeader && authHeader.startsWith('Bearer ')) {
             const token = authHeader.substring(7);
+            console.log('[AUTH] Verifying JWT token...');
             const payload = verifyToken(token);
             if (payload) {
+                console.log('[AUTH] JWT valid for:', payload.email);
                 req.user = payload;
                 return next();
+            } else {
+                console.log('[AUTH] JWT verification failed');
             }
         }
 
