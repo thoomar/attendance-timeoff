@@ -91,11 +91,11 @@ router.use(devUserShim);
 // Create time-off request
 router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, res: Response) => {
     try {
-        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        const sessUser = req.user;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
         const { dates, reason } = CreateReq.parse(req.body);
-        const userId = await ensureUserId(sessUser.email, sessUser.name ?? null);
+        const userId = await ensureUserId(sessUser.email, sessUser.fullName ?? null);
 
         // Insert as DATE[] (array)
         const { rows } = await db.query<{ id: string }>(
@@ -136,10 +136,10 @@ router.post(['/', '/requests', '/request'], requireAuth, async (req: Request, re
 // My requests
 router.get('/mine', requireAuth, async (req: Request, res: Response) => {
     try {
-        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        const sessUser = req.user;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
-        const userId = await ensureUserId(sessUser.email, sessUser.name ?? null);
+        const userId = await ensureUserId(sessUser.email, sessUser.fullName ?? null);
 
         const { rows } = await db.query(
             `
@@ -186,7 +186,7 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
-        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        const sessUser = req.user;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
         // Normalize DENIED to REJECTED for database consistency
@@ -255,7 +255,7 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
     try {
         const id = req.params.id;
         const body = DecisionReq.parse(req.body);
-        const sessUser = req.session?.user as { email: string; name?: string | null } | undefined;
+        const sessUser = req.user;
         if (!sessUser?.email) return res.status(401).json({ ok: false, error: 'UNAUTHENTICATED' });
 
         // Normalize DENIED to REJECTED for database consistency
