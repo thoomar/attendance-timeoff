@@ -140,6 +140,9 @@ router.get('/callback', async (req: Request, res: Response) => {
             });
         });
 
+        // Small delay to ensure cookie header is sent before redirect
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
         return res.redirect(APP_BASE_URL);
     } catch (err) {
         console.error('[ENTRA CALLBACK ERROR]', err);
