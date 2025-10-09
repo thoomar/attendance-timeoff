@@ -119,17 +119,40 @@ router.get('/callback', async (req: Request, res: Response) => {
             (claims.preferred_username as string) ||
             '';
 
-        const userPayload = {
-            id: (claims.oid as string) || (claims.sub as string),
-            email,
-            fullName: (claims.name as string) || email || 'Unknown',
-            role: 'Enrollment Specialist' as const,
-            managerUserId: null,
-        };
+        // Look up user in database to get their actual role
+        const userLookup = await query<{ id: string; role: string; full_name: string; manager_user_id: string | null }>(
+            'SELECT id, role, full_name, manager_user_id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+
+        let userPayload;
+        if (userLookup.rows.length > 0) {
+            // User exists - use their actual role from database
+            const dbUser = userLookup.rows[0];
+            userPayload = {
+                id: dbUser.id,
+                email,
+                fullName: dbUser.full_name || (claims.name as string) || email,
+                role: dbUser.role as any,
+                managerUserId: dbUser.manager_user_id,
+            };
+            console.log('[CALLBACK] Existing user found with role:', dbUser.role);
+        } else {
+            // New user - create with default role
+            const newId = (claims.oid as string) || (claims.sub as string);
+            userPayload = {
+                id: newId,
+                email,
+                fullName: (claims.name as string) || email || 'Unknown',
+                role: 'Enrollment Specialist' as const,
+                managerUserId: null,
+            };
+            console.log('[CALLBACK] New user, assigning default role');
+        }
 
         // Generate JWT token (bypasses all cookie issues)
         const token = signToken(userPayload);
-        console.log('[CALLBACK] JWT generated for:', email);
+        console.log('[CALLBACK] JWT generated for:', email, 'with role:', userPayload.role);
         
         // Redirect with token as query parameter for frontend to capture
         return res.redirect(`${APP_BASE_URL}?token=${token}`);
