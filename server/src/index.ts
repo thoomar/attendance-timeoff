@@ -85,10 +85,11 @@ app.use(
         }),
         cookie: {
             httpOnly: true,
-            // Use Lax for better compatibility (same-site redirects OK)
-            sameSite: 'lax',
+            // OAuth requires None to survive Microsoft redirects
+            sameSite: 'none',
             secure: true,
-            domain: IS_PROD ? COOKIE_DOMAIN : undefined,
+            // No domain - let browser set it
+            domain: undefined,
             path: '/',
             maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
         },
