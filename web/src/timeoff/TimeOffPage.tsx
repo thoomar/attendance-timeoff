@@ -93,7 +93,10 @@ export default function TimeOffPage() {
 
     // Capture JWT token from URL if present (after OAuth redirect)
     useEffect(() => {
-        captureTokenFromURL();
+        if (captureTokenFromURL()) {
+            // Token was captured - reload the page to fetch user data with token
+            window.location.reload();
+        }
     }, []);
 
     // --- Load current user ---
