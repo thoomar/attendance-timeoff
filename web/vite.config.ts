@@ -12,6 +12,7 @@ const devUser = {
 
 export default defineConfig({
     plugins: [react()],
+    publicDir: 'public',
     server: {
         proxy: {
             '/api': {
