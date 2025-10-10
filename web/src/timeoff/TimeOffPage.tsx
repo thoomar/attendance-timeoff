@@ -355,10 +355,16 @@ export default function TimeOffPage() {
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                         <div className="relative h-9 w-9">
-                            <div className="absolute inset-0 rounded-full bg-yellow-500/30 blur-md"></div>
-                            <div className="relative h-full w-full rounded-full bg-gradient-to-br from-yellow-500 to-yellow-600 flex items-center justify-center text-black font-bold text-lg">
-                                T
-                            </div>
+                            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-lg">
+                                <defs>
+                                    <linearGradient id="goldGradHeader" x1="0%" y1="0%" x2="100%" y2="100%">
+                                        <stop offset="0%" style={{ stopColor: '#c9a547', stopOpacity: 1 }} />
+                                        <stop offset="100%" style={{ stopColor: '#b8933d', stopOpacity: 1 }} />
+                                    </linearGradient>
+                                </defs>
+                                <circle cx="50" cy="50" r="48" fill="url(#goldGradHeader)" />
+                                <path d="M 30 35 L 70 35 L 70 42 L 55 42 L 55 75 L 45 75 L 45 42 L 30 42 Z" fill="white" />
+                            </svg>
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
