@@ -121,6 +121,8 @@ input::placeholder, textarea::placeholder {
 .rdp-day_today { 
   outline: 2px solid var(--primary-gold);
   outline-offset: -2px;
+  font-weight: 700;
+  color: var(--primary-gold) !important;
 }
 
 .rdp-day_has_timeoff {
