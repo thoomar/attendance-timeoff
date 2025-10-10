@@ -354,18 +354,7 @@ export default function TimeOffPage() {
             <header className="sticky top-0 z-30 backdrop-blur bg-black/40 border-b border-slate-800">
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                        <div className="relative h-9 w-9">
-                            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-lg">
-                                <defs>
-                                    <linearGradient id="goldGradHeader" x1="0%" y1="0%" x2="100%" y2="100%">
-                                        <stop offset="0%" style={{ stopColor: '#c9a547', stopOpacity: 1 }} />
-                                        <stop offset="100%" style={{ stopColor: '#b8933d', stopOpacity: 1 }} />
-                                    </linearGradient>
-                                </defs>
-                                <path d="M 50 2 A 48 48 0 0 1 85 15 L 70 30 A 28 28 0 0 0 50 22 A 28 28 0 0 0 22 50 A 28 28 0 0 0 30 70 L 15 85 A 48 48 0 0 1 2 50 A 48 48 0 0 1 50 2 Z M 98 50 A 48 48 0 0 1 50 98 A 48 48 0 0 1 15 85 L 30 70 A 28 28 0 0 0 50 78 A 28 28 0 0 0 78 50 A 28 28 0 0 0 70 30 L 85 15 A 48 48 0 0 1 98 50 Z" fill="url(#goldGradHeader)" />
-                                <path d="M 25 25 L 75 25 L 75 38 L 60 38 L 60 80 L 40 80 L 40 38 L 25 38 Z" fill="white" />
-                            </svg>
-                        </div>
+                        <img src="/logo.png" alt="Timeshare Help Center" className="h-9 w-9 drop-shadow-lg" />
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
                     <div className="flex items-center gap-3">
