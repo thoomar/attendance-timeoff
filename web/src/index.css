@@ -141,7 +141,7 @@ input::placeholder, textarea::placeholder {
   background-color: var(--primary-gold);
 }
 
-/* Remove blue from navigation arrows and buttons */
+/* Remove ALL blue from calendar - force gold theme */
 .rdp-nav_button:hover {
   background-color: rgba(255, 215, 0, 0.1) !important;
 }
@@ -152,4 +152,23 @@ input::placeholder, textarea::placeholder {
 
 .rdp-nav_button svg {
   color: var(--primary-gold) !important;
+}
+
+/* Override any blue dots/markers */
+.rdp-day::before,
+.rdp-day::after {
+  background-color: var(--primary-gold) !important;
+}
+
+/* Force gold for focused elements */
+.rdp-day:focus,
+.rdp-day:focus-visible {
+  outline: 2px solid var(--primary-gold) !important;
+  outline-offset: 2px;
+}
+
+/* Remove blue from any active state */
+.rdp button:active,
+.rdp button:focus {
+  background-color: rgba(255, 215, 0, 0.2) !important;
 }
