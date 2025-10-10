@@ -354,8 +354,8 @@ export default function TimeOffPage() {
             <header className="sticky top-0 z-30 backdrop-blur bg-black/40 border-b border-slate-800">
                 <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                        <div className="h-9 w-9 rounded-full bg-black flex items-center justify-center">
-                            <img src="/logo.png" alt="Timeshare Help Center" className="h-9 w-9 drop-shadow-lg" />
+                        <div className="h-9 w-9 rounded-full bg-black flex items-center justify-center overflow-hidden">
+                            <img src="/logo.png" alt="Timeshare Help Center" className="h-9 w-9 drop-shadow-lg" style={{ mixBlendMode: 'multiply' }} />
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
                     </div>
