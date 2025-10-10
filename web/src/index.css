@@ -140,3 +140,16 @@ input::placeholder, textarea::placeholder {
   border-radius: 50%;
   background-color: var(--primary-gold);
 }
+
+/* Remove blue from navigation arrows and buttons */
+.rdp-nav_button:hover {
+  background-color: rgba(255, 215, 0, 0.1) !important;
+}
+
+.rdp-day:hover:not(.rdp-day_selected) {
+  background-color: rgba(255, 215, 0, 0.1) !important;
+}
+
+.rdp-nav_button svg {
+  color: var(--primary-gold) !important;
+}
