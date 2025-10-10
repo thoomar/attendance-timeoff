@@ -362,8 +362,8 @@ export default function TimeOffPage() {
                                         <stop offset="100%" style={{ stopColor: '#b8933d', stopOpacity: 1 }} />
                                     </linearGradient>
                                 </defs>
-                                <circle cx="50" cy="50" r="48" fill="url(#goldGradHeader)" />
-                                <path d="M 30 35 L 70 35 L 70 42 L 55 42 L 55 75 L 45 75 L 45 42 L 30 42 Z" fill="white" />
+                                <path d="M 50 2 A 48 48 0 0 1 85 15 L 70 30 A 28 28 0 0 0 50 22 A 28 28 0 0 0 22 50 A 28 28 0 0 0 30 70 L 15 85 A 48 48 0 0 1 2 50 A 48 48 0 0 1 50 2 Z M 98 50 A 48 48 0 0 1 50 98 A 48 48 0 0 1 15 85 L 30 70 A 28 28 0 0 0 50 78 A 28 28 0 0 0 78 50 A 28 28 0 0 0 70 30 L 85 15 A 48 48 0 0 1 98 50 Z" fill="url(#goldGradHeader)" />
+                                <path d="M 35 32 L 65 32 L 65 40 L 56 40 L 56 75 L 44 75 L 44 40 L 35 40 Z" fill="white" />
                             </svg>
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
