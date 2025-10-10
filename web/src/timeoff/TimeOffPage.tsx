@@ -363,7 +363,7 @@ export default function TimeOffPage() {
                                     </linearGradient>
                                 </defs>
                                 <path d="M 50 2 A 48 48 0 0 1 85 15 L 70 30 A 28 28 0 0 0 50 22 A 28 28 0 0 0 22 50 A 28 28 0 0 0 30 70 L 15 85 A 48 48 0 0 1 2 50 A 48 48 0 0 1 50 2 Z M 98 50 A 48 48 0 0 1 50 98 A 48 48 0 0 1 15 85 L 30 70 A 28 28 0 0 0 50 78 A 28 28 0 0 0 78 50 A 28 28 0 0 0 70 30 L 85 15 A 48 48 0 0 1 98 50 Z" fill="url(#goldGradHeader)" />
-                                <path d="M 32 30 L 68 30 L 68 38 L 63 38 L 58 43 L 58 78 L 42 78 L 42 43 L 37 38 L 32 38 Z" fill="white" />
+                                <path d="M 28 28 L 72 28 L 72 38 L 65 38 L 62 41 L 62 78 L 38 78 L 38 41 L 35 38 L 28 38 Z" fill="white" />
                             </svg>
                         </div>
                         <span className="text-lg font-semibold tracking-tight">Time Off</span>
