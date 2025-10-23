@@ -142,6 +142,23 @@ input::placeholder, textarea::placeholder {
   background-color: var(--primary-gold);
 }
 
+/* Holiday styling - red background for non-selectable company holidays */
+.rdp-day_holiday {
+  background-color: rgba(220, 38, 38, 0.2) !important;
+  color: rgb(252, 165, 165) !important;
+  font-weight: 600;
+  position: relative;
+}
+
+.rdp-day_holiday:hover {
+  background-color: rgba(220, 38, 38, 0.3) !important;
+}
+
+.rdp-day_holiday.rdp-day_disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* Remove ALL blue from calendar - force gold theme */
 .rdp-nav_button:hover {
   background-color: rgba(255, 215, 0, 0.1) !important;

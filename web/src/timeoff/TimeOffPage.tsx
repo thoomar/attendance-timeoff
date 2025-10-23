@@ -2,12 +2,25 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { z } from 'zod';
-import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock, LogOut } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock, LogOut, CalendarOff } from 'lucide-react';
 import { getAuthHeaders, captureTokenFromURL, clearToken } from '../auth/token';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
 type User = { id: string; name: string; role: Role };
+
+// Company Observed Holidays for 2025
+const COMPANY_HOLIDAYS_2025 = [
+    { date: new Date(2025, 0, 1), name: 'New Year\'s Day', dayOfWeek: 'Wednesday' },
+    { date: new Date(2025, 4, 26), name: 'Memorial Day', dayOfWeek: 'Monday' },
+    { date: new Date(2025, 6, 4), name: 'Independence Day', dayOfWeek: 'Friday' },
+    { date: new Date(2025, 8, 1), name: 'Labor Day', dayOfWeek: 'Monday' },
+    { date: new Date(2025, 10, 27), name: 'Thanksgiving Day', dayOfWeek: 'Thursday' },
+    { date: new Date(2025, 10, 28), name: 'Day After Thanksgiving', dayOfWeek: 'Friday' },
+    { date: new Date(2025, 11, 24), name: 'Christmas Eve', dayOfWeek: 'Wednesday' },
+    { date: new Date(2025, 11, 25), name: 'Christmas Day', dayOfWeek: 'Thursday' },
+    { date: new Date(2025, 11, 31), name: 'New Year\'s Eve', dayOfWeek: 'Wednesday' },
+];
 
 // Server calendar entry shape (normalized below)
 type CalendarEntry = {
@@ -378,6 +391,39 @@ export default function TimeOffPage() {
 
             {/* Page */}
             <main className="mx-auto max-w-6xl px-6 py-8">
+                {/* Company Holidays Section */}
+                <section className="card p-6 mb-6">
+                    <h2 className="text-base font-semibold mb-3 flex items-center gap-2">
+                        <CalendarOff className="h-5 w-5 text-red-400" />
+                        Company Observed Holidays for 2025
+                    </h2>
+                    <p className="text-sm text-slate-400 mb-4">
+                        As a courtesy to our new team members, please take note the office will be closed on the dates posted below:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {COMPANY_HOLIDAYS_2025.map((holiday, idx) => (
+                            <div 
+                                key={idx} 
+                                className="rounded-lg border border-red-800 bg-red-950/30 p-3 flex items-center gap-3"
+                            >
+                                <div className="flex-shrink-0 flex items-center justify-center w-12 h-12 rounded-lg bg-red-900/50 border border-red-700">
+                                    <span className="text-lg font-bold text-red-200">
+                                        {holiday.date.getMonth() + 1}/{holiday.date.getDate()}
+                                    </span>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-semibold text-sm text-slate-200 truncate">
+                                        {holiday.name}
+                                    </div>
+                                    <div className="text-xs text-slate-400">
+                                        {holiday.dayOfWeek}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </section>
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     {/* LEFT */}
                     <section className="card p-6">
@@ -390,16 +436,27 @@ export default function TimeOffPage() {
                             mode="multiple"
                             selected={selected}
                             onSelect={(val) => setSelected(val || [])}
-                            disabled={{ before: new Date() }}
+                            disabled={[
+                                { before: new Date() },
+                                ...COMPANY_HOLIDAYS_2025.map(h => h.date)
+                            ]}
                             className="rdp"
                             modifiers={{
                                 hasTimeOff: (date) => {
                                     const dateStr = date.toISOString().slice(0, 10);
                                     return calendar.some(e => e.dates.some(d => d.startsWith(dateStr)));
+                                },
+                                holiday: (date) => {
+                                    return COMPANY_HOLIDAYS_2025.some(h => 
+                                        h.date.getFullYear() === date.getFullYear() &&
+                                        h.date.getMonth() === date.getMonth() &&
+                                        h.date.getDate() === date.getDate()
+                                    );
                                 }
                             }}
                             modifiersClassNames={{
-                                hasTimeOff: 'rdp-day_has_timeoff'
+                                hasTimeOff: 'rdp-day_has_timeoff',
+                                holiday: 'rdp-day_holiday'
                             }}
                             onDayClick={(day) => {
                                 // Get local date parts to avoid timezone issues
