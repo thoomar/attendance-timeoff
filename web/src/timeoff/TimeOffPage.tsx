@@ -9,12 +9,8 @@ const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string()
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
 type User = { id: string; name: string; role: Role };
 
-// Company Observed Holidays for 2025
+// Company Observed Holidays for 2025 (upcoming only - past holidays removed for clarity)
 const COMPANY_HOLIDAYS_2025 = [
-    { date: new Date(2025, 0, 1), name: 'New Year\'s Day', dayOfWeek: 'Wednesday', year: 2025 },
-    { date: new Date(2025, 4, 26), name: 'Memorial Day', dayOfWeek: 'Monday', year: 2025 },
-    { date: new Date(2025, 6, 4), name: 'Independence Day', dayOfWeek: 'Friday', year: 2025 },
-    { date: new Date(2025, 8, 1), name: 'Labor Day', dayOfWeek: 'Monday', year: 2025 },
     { date: new Date(2025, 10, 27), name: 'Thanksgiving Day', dayOfWeek: 'Thursday', year: 2025 },
     { date: new Date(2025, 10, 28), name: 'Day After Thanksgiving', dayOfWeek: 'Friday', year: 2025 },
     { date: new Date(2025, 11, 24), name: 'Christmas Eve', dayOfWeek: 'Wednesday', year: 2025 },
