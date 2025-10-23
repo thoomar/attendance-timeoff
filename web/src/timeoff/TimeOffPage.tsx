@@ -9,8 +9,12 @@ const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string()
 type Role = 'Enrollment Specialist' | 'Senior Contract Specialist' | 'Manager' | 'Admin';
 type User = { id: string; name: string; role: Role };
 
-// Company Observed Holidays for 2025 (upcoming only - past holidays removed for clarity)
+// Company Observed Holidays for 2025
 const COMPANY_HOLIDAYS_2025 = [
+    { date: new Date(2025, 0, 1), name: 'New Year\'s Day', dayOfWeek: 'Wednesday', year: 2025 },
+    { date: new Date(2025, 4, 26), name: 'Memorial Day', dayOfWeek: 'Monday', year: 2025 },
+    { date: new Date(2025, 6, 4), name: 'Independence Day', dayOfWeek: 'Friday', year: 2025 },
+    { date: new Date(2025, 8, 1), name: 'Labor Day', dayOfWeek: 'Monday', year: 2025 },
     { date: new Date(2025, 10, 27), name: 'Thanksgiving Day', dayOfWeek: 'Thursday', year: 2025 },
     { date: new Date(2025, 10, 28), name: 'Day After Thanksgiving', dayOfWeek: 'Friday', year: 2025 },
     { date: new Date(2025, 11, 24), name: 'Christmas Eve', dayOfWeek: 'Wednesday', year: 2025 },
@@ -114,6 +118,13 @@ export default function TimeOffPage() {
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
     const [selectedDatesInfo, setSelectedDatesInfo] = useState<Array<{ date: string; dateStr: string; people: string[] }>>([]);
     const [holidaysExpanded, setHolidaysExpanded] = useState(true);
+
+    // Filter holidays to show only upcoming ones (not past)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Reset to start of day for accurate comparison
+    
+    const upcomingHolidays2025 = COMPANY_HOLIDAYS_2025.filter(h => h.date >= today);
+    const upcomingHolidays2026 = COMPANY_HOLIDAYS_2026.filter(h => h.date >= today);
 
     // Zoho disabled - using Microsoft O365 instead
     const zohoConnected = true;
@@ -428,9 +439,11 @@ export default function TimeOffPage() {
                             </p>
                             
                             {/* 2025 Holidays */}
-                            <h3 className="text-sm font-semibold text-slate-300 mb-2 mt-4">2025</h3>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
-                        {COMPANY_HOLIDAYS_2025.map((holiday, idx) => (
+                            {upcomingHolidays2025.length > 0 && (
+                                <>
+                                    <h3 className="text-sm font-semibold text-slate-300 mb-2 mt-4">2025</h3>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+                                {upcomingHolidays2025.map((holiday, idx) => (
                             <div 
                                 key={idx} 
                                 className="rounded-lg border border-red-800 bg-red-950/30 p-3 flex items-center gap-3"
@@ -449,13 +462,17 @@ export default function TimeOffPage() {
                                     </div>
                                 </div>
                             </div>
-                        ))}
-                            </div>
+                                ))}
+                                    </div>
+                                </>
+                            )}
                             
                             {/* 2026 Holidays */}
-                            <h3 className="text-sm font-semibold text-slate-300 mb-2 mt-2">2026</h3>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {COMPANY_HOLIDAYS_2026.map((holiday, idx) => (
+                            {upcomingHolidays2026.length > 0 && (
+                                <>
+                                    <h3 className="text-sm font-semibold text-slate-300 mb-2 mt-2">2026</h3>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {upcomingHolidays2026.map((holiday, idx) => (
                             <div 
                                 key={idx} 
                                 className="rounded-lg border border-red-800 bg-red-950/30 p-3 flex items-center gap-3"
@@ -474,8 +491,10 @@ export default function TimeOffPage() {
                                     </div>
                                 </div>
                             </div>
-                        ))}
-                            </div>
+                                ))}
+                                    </div>
+                                </>
+                            )}
                         </>
                     )}
                 </section>
