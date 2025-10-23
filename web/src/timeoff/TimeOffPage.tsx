@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { z } from 'zod';
-import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock, LogOut, CalendarOff } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, SendHorizonal, Clock, LogOut, CalendarOff, ChevronDown, ChevronUp } from 'lucide-react';
 import { getAuthHeaders, captureTokenFromURL, clearToken } from '../auth/token';
 
 const CreateReq = z.object({ dates: z.array(z.date()).min(1), reason: z.string().min(3) });
@@ -100,6 +100,7 @@ export default function TimeOffPage() {
     const [myRequests, setMyRequests] = useState<MyRequestItem[]>([]);
     const [calendar, setCalendar] = useState<CalendarEntry[]>([]);
     const [selectedDatesInfo, setSelectedDatesInfo] = useState<Array<{ date: string; dateStr: string; people: string[] }>>([]);
+    const [holidaysExpanded, setHolidaysExpanded] = useState(true);
 
     // Zoho disabled - using Microsoft O365 instead
     const zohoConnected = true;
@@ -393,14 +394,27 @@ export default function TimeOffPage() {
             <main className="mx-auto max-w-6xl px-6 py-8">
                 {/* Company Holidays Section */}
                 <section className="card p-6 mb-6">
-                    <h2 className="text-base font-semibold mb-3 flex items-center gap-2">
-                        <CalendarOff className="h-5 w-5 text-red-400" />
-                        Company Observed Holidays for 2025
-                    </h2>
-                    <p className="text-sm text-slate-400 mb-4">
-                        As a courtesy to our new team members, please take note the office will be closed on the dates posted below:
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <div 
+                        className="flex items-center justify-between cursor-pointer mb-3"
+                        onClick={() => setHolidaysExpanded(!holidaysExpanded)}
+                    >
+                        <h2 className="text-base font-semibold flex items-center gap-2">
+                            <CalendarOff className="h-5 w-5 text-red-400" />
+                            Company Observed Holidays for 2025
+                        </h2>
+                        <button 
+                            className="text-slate-400 hover:text-slate-200 transition-colors"
+                            aria-label={holidaysExpanded ? "Collapse" : "Expand"}
+                        >
+                            {holidaysExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                        </button>
+                    </div>
+                    {holidaysExpanded && (
+                        <>
+                            <p className="text-sm text-slate-400 mb-4">
+                                Please take note the office will be closed on the dates posted below:
+                            </p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                         {COMPANY_HOLIDAYS_2025.map((holiday, idx) => (
                             <div 
                                 key={idx} 
@@ -421,7 +435,9 @@ export default function TimeOffPage() {
                                 </div>
                             </div>
                         ))}
-                    </div>
+                            </div>
+                        </>
+                    )}
                 </section>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
