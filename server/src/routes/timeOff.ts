@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAuth } from '../auth';
 import * as db from '../db';
 import { sendTimeOffEmail } from '../services/timeoffEmail';
+import { sendCalendarInvite } from '../services/calendarInvite';
 
 const router = express.Router();
 
@@ -243,6 +244,21 @@ router.patch('/:id', requireAuth, async (req: Request, res: Response) => {
             console.warn('[email] Decision notification send failed:', e);
         }
 
+        // Send calendar invite for approved requests
+        if (normalizedDecision === 'APPROVED') {
+            try {
+                await sendCalendarInvite({
+                    requestId: id,
+                    employeeName: requestData.user_name || requestData.user_email,
+                    employeeEmail: requestData.user_email,
+                    dates: requestData.dates || [],
+                    reason: 'Time Off',
+                });
+            } catch (e) {
+                console.warn('[calendar] Calendar invite send failed:', e);
+            }
+        }
+
         return res.json({ ok: true });
     } catch (e: any) {
         console.error('[time-off][decision:patch] error:', e?.stack || e);
@@ -310,6 +326,21 @@ router.post('/:id/decision', requireAuth, async (req: Request, res: Response) =>
             });
         } catch (e) {
             console.warn('[email] Decision notification send failed:', e);
+        }
+
+        // Send calendar invite for approved requests
+        if (normalizedDecision === 'APPROVED') {
+            try {
+                await sendCalendarInvite({
+                    requestId: id,
+                    employeeName: requestData.user_name || requestData.user_email,
+                    employeeEmail: requestData.user_email,
+                    dates: requestData.dates || [],
+                    reason: 'Time Off',
+                });
+            } catch (e) {
+                console.warn('[calendar] Calendar invite send failed:', e);
+            }
         }
 
         return res.json({ ok: true });
