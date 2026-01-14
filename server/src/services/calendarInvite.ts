@@ -15,8 +15,24 @@ function generateUID(requestId: string): string {
     return `timeoff-${requestId}@timesharehelpcenter.com`;
 }
 
-function formatDateForICS(dateStr: string, allDay: boolean = true): string {
-    // dateStr is 'YYYY-MM-DD'
+function normalizeDate(dateInput: string | Date): string {
+    // Convert Date object or string to 'YYYY-MM-DD' format
+    if (dateInput instanceof Date) {
+        const year = dateInput.getFullYear();
+        const month = String(dateInput.getMonth() + 1).padStart(2, '0');
+        const day = String(dateInput.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+    // If it's already a string, ensure it's in the right format
+    const dateStr = String(dateInput);
+    if (dateStr.includes('T')) {
+        return dateStr.split('T')[0];
+    }
+    return dateStr;
+}
+
+function formatDateForICS(dateInput: string | Date, allDay: boolean = true): string {
+    const dateStr = normalizeDate(dateInput);
     const [year, month, day] = dateStr.split('-');
     if (allDay) {
         return `${year}${month}${day}`;
@@ -24,7 +40,8 @@ function formatDateForICS(dateStr: string, allDay: boolean = true): string {
     return `${year}${month}${day}T000000Z`;
 }
 
-function addDays(dateStr: string, days: number): string {
+function addDays(dateInput: string | Date, days: number): string {
+    const dateStr = normalizeDate(dateInput);
     const date = new Date(dateStr);
     date.setDate(date.getDate() + days);
     const year = date.getFullYear();
@@ -39,17 +56,17 @@ function generateICSContent(data: CalendarInviteData): string {
     const now = new Date();
     const dtstamp = now.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
     
-    // Sort dates and get range
-    const sortedDates = [...dates].sort();
-    const startDate = sortedDates[0];
-    const endDate = sortedDates[sortedDates.length - 1];
+    // Normalize and sort dates
+    const normalizedDates = dates.map(d => normalizeDate(d)).sort();
+    const startDate = normalizedDates[0];
+    const endDate = normalizedDates[normalizedDates.length - 1];
     
     // For all-day events, DTEND should be the day after the last day
     const dtstart = formatDateForICS(startDate);
     const dtend = addDays(endDate, 1);
     
     const summary = `Time Off: ${employeeName}`;
-    const description = `Employee: ${employeeName}\\nReason: ${reason}\\nDates: ${sortedDates.join(', ')}`;
+    const description = `Employee: ${employeeName}\\nReason: ${reason}\\nDates: ${normalizedDates.join(', ')}`;
     
     const icsContent = [
         'BEGIN:VCALENDAR',
@@ -75,10 +92,10 @@ function generateICSContent(data: CalendarInviteData): string {
 
 export async function sendCalendarInvite(data: CalendarInviteData): Promise<void> {
     const { employeeName, dates, reason } = data;
-    const sortedDates = [...dates].sort();
-    const dateRange = sortedDates.length > 1 
-        ? `${sortedDates[0]} to ${sortedDates[sortedDates.length - 1]}`
-        : sortedDates[0];
+    const normalizedDates = dates.map(d => normalizeDate(d)).sort();
+    const dateRange = normalizedDates.length > 1 
+        ? `${normalizedDates[0]} to ${normalizedDates[normalizedDates.length - 1]}`
+        : normalizedDates[0];
     
     const icsContent = generateICSContent(data);
     
@@ -86,7 +103,7 @@ export async function sendCalendarInvite(data: CalendarInviteData): Promise<void
     const htmlBody = `
         <p>A time-off request has been approved.</p>
         <p><strong>Employee:</strong> ${employeeName}</p>
-        <p><strong>Dates:</strong> ${sortedDates.join(', ')}</p>
+        <p><strong>Dates:</strong> ${normalizedDates.join(', ')}</p>
         <p><strong>Reason:</strong> ${reason}</p>
         <p>Please see the attached calendar invite (.ics file) to add this to your calendar.</p>
     `;
@@ -94,7 +111,7 @@ export async function sendCalendarInvite(data: CalendarInviteData): Promise<void
 Time Off Approved
 
 Employee: ${employeeName}
-Dates: ${sortedDates.join(', ')}
+Dates: ${normalizedDates.join(', ')}
 Reason: ${reason}
 
 Please see the attached calendar invite (.ics file) to add this to your calendar.
